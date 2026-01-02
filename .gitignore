@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Output files
+*.xml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

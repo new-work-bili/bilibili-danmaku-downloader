@@ -1,0 +1,25 @@
+{
+  "name": "bilibili-danmaku-downloader",
+  "version": "1.0.0",
+  "description": "下载B站弹幕",
+  "main": "src/get-danmaku.js",
+  "bin": {
+    "get-danmaku": "./src/get-danmaku.js",
+    "get-danmaku-v2": "./src/get-danmaku-v2.js"
+  },
+  "scripts": {
+    "danmaku": "node src/get-danmaku.js",
+    "danmaku-v2": "node src/get-danmaku-v2.js"
+  },
+  "keywords": [
+    "bilibili",
+    "danmaku",
+    "弹幕",
+    "B站"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
