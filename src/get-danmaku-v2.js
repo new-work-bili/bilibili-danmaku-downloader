@@ -4,6 +4,10 @@ const fs = require('fs');
 const zlib = require('zlib');
 const path = require('path');
 
+// 输出目录：项目目录同级的"弹幕文件夹"
+const projectRoot = path.resolve(__dirname, '..');
+const outputDir = path.join(path.dirname(projectRoot), '弹幕文件夹');
+
 // --- 命令行参数解析 ---
 const args = process.argv.slice(2);
 const bvId = args.find(arg => arg.startsWith('BV'));
@@ -51,7 +55,7 @@ function fetchXmlContent(url) {
     return new Promise((resolve, reject) => {
         https.get(url, { headers }, (res) => {
             if (res.statusCode !== 200) return reject(new Error(`Status ${res.statusCode}`));
-            
+
             let stream = res;
             if (res.headers['content-encoding'] === 'gzip') stream = res.pipe(zlib.createGunzip());
             else if (res.headers['content-encoding'] === 'deflate') stream = res.pipe(zlib.createInflateRaw());
@@ -66,8 +70,14 @@ function fetchXmlContent(url) {
 
 (async () => {
     try {
-        console.log(`🔍 正在获取视频列表: ${bvId} ...`);
-        
+        // 确保输出目录存在
+        if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
+            console.log(`� 创建目录: ${outputDir}`);
+        }
+
+        console.log(`�🔍 正在获取视频列表: ${bvId} ...`);
+
         const viewData = await fetchJson(`https://api.bilibili.com/x/web-interface/view?bvid=${bvId}`);
         if (viewData.code !== 0) throw new Error(viewData.message);
 
@@ -80,7 +90,7 @@ function fetchXmlContent(url) {
         // --- 模式 A: 合并下载 ---
         if (isMerge) {
             console.log(`🔄 正在并行下载所有分P弹幕并合并...`);
-            
+
             const tasks = pages.map(page => {
                 const url = `https://comment.bilibili.com/${page.cid}.xml`;
                 return fetchXmlContent(url).then(content => ({
@@ -93,7 +103,7 @@ function fetchXmlContent(url) {
             });
 
             const results = await Promise.all(tasks);
-            
+
             let allDanmaku = [];
             results.forEach(res => {
                 if (res && res.content) {
@@ -110,31 +120,33 @@ function fetchXmlContent(url) {
     <source>k-v</source>
     ${allDanmaku.join('\n    ')}
 </i>`;
-            
+
             // 合并模式的文件名也加上了 BV 号
             const fileName = `${mainTitle}_[全集合并]_${bvId}.xml`;
-            fs.writeFileSync(fileName, mergedXml);
-            console.log(`🎉 合并完成！已保存: \x1b[32m${fileName}\x1b[0m (共 ${allDanmaku.length} 条弹幕)`);
+            const filePath = path.join(outputDir, fileName);
+            fs.writeFileSync(filePath, mergedXml);
+            console.log(`🎉 合并完成！已保存: \x1b[32m${filePath}\x1b[0m (共 ${allDanmaku.length} 条弹幕)`);
 
-        } 
+        }
         // --- 模式 B: 分开下载 (默认) ---
         else {
             console.log(`⬇️  开始逐个下载...`);
-            
+
             for (const page of pages) {
                 const cid = page.cid;
                 const partName = sanitizeFilename(page.part);
-                
+
                 // --- 修正处：文件名加上了 BV 号 ---
                 // 格式: 标题_P1_分集名_BV号.xml
                 const fileName = `${mainTitle}_P${page.page}_${partName}_${bvId}.xml`;
-                
+                const filePath = path.join(outputDir, fileName);
+
                 const url = `https://comment.bilibili.com/${cid}.xml`;
 
                 try {
                     const content = await fetchXmlContent(url);
-                    fs.writeFileSync(fileName, content);
-                    console.log(`   [P${page.page}] ${fileName} ✅`);
+                    fs.writeFileSync(filePath, content);
+                    console.log(`   [P${page.page}] ${filePath} ✅`);
                 } catch (err) {
                     console.error(`   [P${page.page}] 下载失败 ❌: ${err.message}`);
                 }
