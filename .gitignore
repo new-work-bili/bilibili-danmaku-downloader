@@ -13,3 +13,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Local Agnet Rules
+.cursorrules

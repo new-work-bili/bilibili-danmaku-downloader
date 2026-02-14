@@ -9,20 +9,29 @@
 - ✅ 支持多 P 视频分集下载
 - ✅ 支持多 P 弹幕合并下载
 - ✅ 输出标准 B 站 XML 格式弹幕文件
+- ✅ 油猴脚本版 — 在 B 站页面内一键下载
 
-## 环境要求
+## 版本说明
 
-- Node.js >= 14.0
+| 版本 | 文件 | 说明 |
+|:---|:---|:---|
+| v1 基础版 | `src/get-danmaku.js` | 命令行工具，适用于单 P 视频 |
+| v2 进阶版 | `src/get-danmaku-v2.js` | 命令行工具，支持多 P + 合并下载 |
+| v3 油猴版 | `src/get-danmaku-v3.user.js` | 浏览器油猴脚本，在 B 站页面内操作 |
 
 ## 使用方法
 
-### 基础版 (单 P 视频)
+### v1 基础版 (命令行 · 单 P 视频)
+
+**环境要求**: Node.js >= 14.0
 
 ```bash
 node src/get-danmaku.js BV1xx411c7mD
 ```
 
-### 进阶版 (多 P 视频)
+### v2 进阶版 (命令行 · 多 P 视频)
+
+**环境要求**: Node.js >= 14.0
 
 **分 P 下载 (默认模式)**
 ```bash
@@ -36,11 +45,31 @@ node src/get-danmaku-v2.js BV1xx411c7mD --merge
 node src/get-danmaku-v2.js BV1xx411c7mD -m
 ```
 
+### v3 油猴版 (浏览器插件)
+
+在浏览器中直接使用，无需 Node.js 环境。
+
+**安装步骤：**
+
+1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 浏览器扩展
+2. 点击下方链接安装脚本（或在 Tampermonkey 中手动新建脚本并粘贴代码）：
+   - [从 GitHub 安装](../../raw/main/src/get-danmaku-v3.user.js)
+3. 打开任意 B 站视频页面（如 `https://www.bilibili.com/video/BV...`）
+4. 页面右下角会出现一个粉色悬浮按钮，点击即可打开下载面板
+5. 选择 **逐 P 下载** 或 **合并下载**
+
+**功能特点：**
+- 🎯 自动识别当前视频 BV 号
+- 📊 显示视频标题和分 P 数量
+- ⬇️ 支持逐 P 下载和合并下载
+- 📈 实时下载进度反馈
+- 🔄 B 站 SPA 页面切换自动刷新
+
 ## 输出文件
 
 - 基础版: `视频标题_BV号.xml`
-- 进阶版 (分 P): `视频标题_P1_分集名_BV号.xml`
-- 进阶版 (合并): `视频标题_[全集合并]_BV号.xml`
+- 进阶版 / 油猴版 (分 P): `视频标题_P1_分集名_BV号.xml`
+- 进阶版 / 油猴版 (合并): `视频标题_[全集合并]_BV号.xml`
 
 ## License
 
