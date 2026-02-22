@@ -24,12 +24,17 @@
     // ========== 常量 ==========
     const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 小时
     const MAX_LOG_ENTRIES = 500;
+    const MAX_PARALLEL_REQUESTS = 3; // 单个视频最大并发弹幕请求数
     const STORAGE_KEYS = {
         FAV_ID: 'ddl_fav_media_id',
         POLL_ENABLED: 'ddl_poll_enabled',
         LAST_POLL_TIME: 'ddl_last_poll_time',
+        ACTIVE_TAB_TOKEN: 'ddl_active_tab_token', // 多标签页竞争锁
         LOGS: 'ddl_logs',
     };
+
+    // 本标签页的唯一 token
+    const MY_TAB_TOKEN = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     // ========== 工具函数 ==========
 
@@ -432,6 +437,21 @@
             line-height: 1.6;
         }
 
+        /* ---------- 诊断行 ---------- */
+        .ddl-diag {
+            margin-top: 10px;
+            padding: 7px 10px;
+            background: rgba(255, 255, 255, 0.04);
+            border-radius: 7px;
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.3);
+            line-height: 1.8;
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+        .ddl-diag-label { color: rgba(255, 255, 255, 0.2); }
+        .ddl-diag-value { color: rgba(255, 255, 255, 0.5); }
+
         /* ---------- 日志面板按钮行 ---------- */
         .ddl-log-buttons {
             display: flex;
@@ -560,10 +580,12 @@
                 0 6px 25px rgba(251, 114, 153, 0.55),
                 0 0 50px rgba(251, 114, 153, 0.25);
         }
+        /* 隐藏时暂停动画，避免后台标签页持续消耗 GPU */
         #danmaku-dl-trigger.hidden {
             transform: scale(0);
             opacity: 0;
             pointer-events: none;
+            animation-play-state: paused;
         }
 
         @keyframes ddl-pulse {
@@ -652,6 +674,12 @@
                 </div>
 
                 <div class="ddl-poll-status" id="ddl-poll-status">-</div>
+
+                <!-- 诊断信息 -->
+                <div class="ddl-diag" id="ddl-diag">
+                    <span class="ddl-diag-label">标签角色：</span><span class="ddl-diag-value" id="ddl-diag-role">初始化中...</span><br/>
+                    <span class="ddl-diag-label">后台唤醒：</span><span class="ddl-diag-value" id="ddl-diag-wakes">0 次</span>
+                </div>
 
                 <button class="ddl-btn ddl-btn-secondary ddl-btn-sm" id="ddl-poll-now"
                         style="margin-top:10px;">
@@ -870,6 +898,16 @@
     // ========== 收藏夹轮询逻辑 ==========
 
     let isPolling = false;
+    let wakeCount = 0;       // 后台定时器活跃次数
+    let schedulerRole = '初始化中'; // '主控' | '待机'
+
+    const diagRoleEl = panel.querySelector('#ddl-diag-role');
+    const diagWakesEl = panel.querySelector('#ddl-diag-wakes');
+
+    function updateDiag() {
+        diagRoleEl.textContent = schedulerRole;
+        diagWakesEl.textContent = `${wakeCount} 次`;
+    }
 
     function updatePollStatusUI() {
         const enabled = GM_getValue(STORAGE_KEYS.POLL_ENABLED, false);
@@ -890,6 +928,7 @@
         }
         if (isPolling) statusText = '⏳ 正在轮询中...';
         pollStatusEl.textContent = statusText;
+        updateDiag();
     }
 
     /**
@@ -902,13 +941,14 @@
         const title = sanitizeFilename(viewData.data.title);
         const pages = viewData.data.pages;
 
-        // 并行下载所有分P弹幕
-        const tasks = pages.map(page => {
-            const url = `https://comment.bilibili.com/${page.cid}.xml`;
-            return fetchXmlContent(url).then(content => ({ cid: page.cid, content })).catch(() => null);
-        });
-
-        const results = await Promise.all(tasks);
+        // 限并发下载所有分P弹幕，避免瞬间发出过多请求
+        const results = await pooledPromiseAll(
+            pages.map(page => () => {
+                const url = `https://comment.bilibili.com/${page.cid}.xml`;
+                return fetchXmlContent(url).then(content => ({ cid: page.cid, content })).catch(() => null);
+            }),
+            MAX_PARALLEL_REQUESTS
+        );
 
         let allDanmaku = [];
         results.forEach(res => {
@@ -1071,39 +1111,108 @@
         }).join('');
     }
 
-    // ========== 定时调度 ==========
+    // ========== 并发池工具 ==========
+
+    /**
+     * 限制并发数的 Promise.all
+     * @param {Array<() => Promise>} factories  任务工厂函数数组
+     * @param {number} limit  最大并发数
+     */
+    async function pooledPromiseAll(factories, limit) {
+        const results = new Array(factories.length);
+        let nextIdx = 0;
+
+        async function worker() {
+            while (nextIdx < factories.length) {
+                const idx = nextIdx++;
+                results[idx] = await factories[idx]();
+            }
+        }
+
+        const workers = Array.from({ length: Math.min(limit, factories.length) }, worker);
+        await Promise.all(workers);
+        return results;
+    }
+
+    // ========== 定时调度（多标签页竞争锁） ==========
 
     let pollTimer = null;
 
-    function schedulePoll() {
-        if (pollTimer) clearInterval(pollTimer);
+    /**
+     * 尝试获取「活跃调度标签页」的令牌。
+     * 只有持有最新 token 的标签页才会注册 setInterval，
+     * 其余标签页保持静默，避免 N 个标签页同时跑定时器。
+     */
+    function tryAcquireSchedulerLock() {
+        GM_setValue(STORAGE_KEYS.ACTIVE_TAB_TOKEN, MY_TAB_TOKEN);
+        // 稍等片刻，如果被其他标签页覆盖则放弃
+        return new Promise(resolve => {
+            setTimeout(() => {
+                resolve(GM_getValue(STORAGE_KEYS.ACTIVE_TAB_TOKEN, '') === MY_TAB_TOKEN);
+            }, 200 + Math.random() * 300); // 200-500ms 随机延迟，减少竞争碰撞
+        });
+    }
+
+    async function schedulePoll() {
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
 
         const enabled = GM_getValue(STORAGE_KEYS.POLL_ENABLED, false);
         if (!enabled) return;
 
+        // 竞争调度锁：只有一个标签页负责定时
+        const hasLock = await tryAcquireSchedulerLock();
+        if (!hasLock) {
+            // 本标签没抢到锁，每 5 分钟检查一次持锁标签页是否还活着
+            // 间隔与持锁标签页保持一致，避免额外开销
+            schedulerRole = '待机';
+            updateDiag();
+            pollTimer = setInterval(async () => {
+                wakeCount++;
+                updateDiag();
+                const nowEnabled = GM_getValue(STORAGE_KEYS.POLL_ENABLED, false);
+                if (!nowEnabled) { clearInterval(pollTimer); pollTimer = null; return; }
+                // 如果发现锁已消失（持锁标签页关闭），重新竞争
+                const currentToken = GM_getValue(STORAGE_KEYS.ACTIVE_TAB_TOKEN, '');
+                if (!currentToken || currentToken === MY_TAB_TOKEN) {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                    schedulePoll(); // 重新竞争
+                }
+            }, 5 * 60 * 1000); // 每 5 分钟检查，最多延迟 5 分钟接管调度
+            return;
+        }
+
+        // 本标签页持锁，负责实际的轮询调度
+        schedulerRole = '主控';
+        updateDiag();
         const lastPoll = GM_getValue(STORAGE_KEYS.LAST_POLL_TIME, 0);
         const elapsed = Date.now() - lastPoll;
 
         // 如果距上次轮询已超过间隔，立即执行一次
         if (elapsed >= POLL_INTERVAL_MS) {
-            setTimeout(() => pollFavorites(), 3000); // 延迟 3 秒等页面稳定
+            setTimeout(() => pollFavorites(), 3000);
         }
 
-        // 设置定时器
+        // 每 5 分钟检查一次是否到了轮询时间
         pollTimer = setInterval(() => {
+            wakeCount++;
+            updateDiag();
             const nowEnabled = GM_getValue(STORAGE_KEYS.POLL_ENABLED, false);
-            if (!nowEnabled) {
-                clearInterval(pollTimer);
-                pollTimer = null;
+            if (!nowEnabled) { clearInterval(pollTimer); pollTimer = null; return; }
+            // 失去锁时停止（说明有新标签页接管）
+            if (GM_getValue(STORAGE_KEYS.ACTIVE_TAB_TOKEN, '') !== MY_TAB_TOKEN) {
+                clearInterval(pollTimer); pollTimer = null;
+                schedulePoll();
                 return;
             }
-
             const last = GM_getValue(STORAGE_KEYS.LAST_POLL_TIME, 0);
-            // 检查是否已被其他标签页执行过
             if (Date.now() - last >= POLL_INTERVAL_MS) {
                 pollFavorites();
             }
-        }, 5 * 60 * 1000); // 每 5 分钟检查一次是否该轮询
+        }, 5 * 60 * 1000);
     }
 
     // ========== 初始化 ==========
@@ -1119,27 +1228,6 @@
     // 启动定时调度
     schedulePoll();
 
-    // 监听 URL 变化（B站 SPA）
-    let lastUrl = location.href;
-    const observer = new MutationObserver(() => {
-        if (location.href !== lastUrl) {
-            lastUrl = location.href;
-            videoInfo = null;
-            setVideoButtonsDisabled(true);
-            resetProgress();
-            setStatus('');
-            videoTitleEl.textContent = '加载中...';
-            bvTagEl.textContent = '-';
-            partsTagEl.textContent = '-';
 
-            if (isVideoPage()) {
-                videoSection.style.display = 'block';
-                loadVideoInfo();
-            } else {
-                videoSection.style.display = 'none';
-            }
-        }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
 
 })();
