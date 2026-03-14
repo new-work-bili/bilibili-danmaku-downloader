@@ -30,6 +30,8 @@
         POLL_ENABLED: 'ddl_poll_enabled',
         LAST_POLL_TIME: 'ddl_last_poll_time',
         ACTIVE_TAB_TOKEN: 'ddl_active_tab_token', // 多标签页竞争锁
+        ACTIVE_TAB_TS: 'ddl_active_tab_ts',       // 锁续期时间戳
+        POLL_RUNNING: 'ddl_poll_running',          // 全局轮询互斥锁
         LOGS: 'ddl_logs',
     };
 
@@ -85,8 +87,18 @@
         });
     }
 
+    /**
+     * 下载文件到本地。
+     * 由于浏览器 Downloads API 对 blob/data URL 强制重命名的安全限制，放弃创建子文件夹和同名覆盖，
+     * 统一使用原生 <a> 标签下载，确保文件名 100% 正确。
+     * @param {string} filename  文件名（不含路径）
+     * @param {string} content   文件内容
+     */
     function downloadFile(filename, content) {
-        const blob = new Blob([content], { type: 'application/xml;charset=utf-8' });
+        const mimeType = filename.endsWith('.txt')
+            ? 'text/plain;charset=utf-8'
+            : 'application/xml;charset=utf-8';
+        const blob = new Blob([content], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -97,6 +109,19 @@
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         }, 100);
+    }
+
+    /** 生用于日志文件的时间戳, 例如 "2026-03-12_21-33" */
+    function formatPollTimestamp(date) {
+        const pad = n => String(n).padStart(2, '0');
+        return [
+            date.getFullYear(),
+            pad(date.getMonth() + 1),
+            pad(date.getDate()),
+        ].join('-') + '_' + [
+            pad(date.getHours()),
+            pad(date.getMinutes()),
+        ].join('-');
     }
 
     function sleep(ms) {
@@ -982,16 +1007,34 @@
         }
 
         if (isPolling) return;
+
+        // 全局轮询互斥锁：防止多个标签页实例并发运行
+        const pollRunning = GM_getValue(STORAGE_KEYS.POLL_RUNNING, 0);
+        if (Date.now() - pollRunning < 10 * 60 * 1000) {
+            addLog({ type: 'info', message: '另一个标签页正在轮询中，跳过' });
+            return;
+        }
+
+        GM_setValue(STORAGE_KEYS.POLL_RUNNING, Date.now());
         isPolling = true;
         updatePollStatusUI();
 
+        // 本次轮询的子文件夹名（精确到分钟）
+        const pollFolder = formatPollTimestamp(new Date());
+        // 收集本次会话每条记录，用于生成日志文件
+        const sessionLines = [];
         let totalSuccess = 0, totalFail = 0;
 
         try {
             addLog({ type: 'info', message: `开始轮询收藏夹 (ID: ${favId})` });
+            sessionLines.push(`轮询时间: ${pollFolder.replace('_', ' ').replace(/-/g, ':')}`);
+            sessionLines.push(`收藏夹 ID: ${favId}`);
+            sessionLines.push('');
 
             const videos = await fetchFavoriteList(favId);
             addLog({ type: 'info', message: `获取到 ${videos.length} 个视频` });
+            sessionLines.push(`共 ${videos.length} 个视频`);
+            sessionLines.push('─'.repeat(50));
 
             for (let i = 0; i < videos.length; i++) {
                 const video = videos[i];
@@ -1007,6 +1050,8 @@
                         title: video.title,
                         message: `下载成功 · ${result.pages}P · ${result.danmakuCount} 条弹幕`,
                     });
+                    sessionLines.push(`✅ ${result.title}`);
+                    sessionLines.push(`   ${video.bvid}  ${result.pages}P · ${result.danmakuCount} 条弹幕`);
                     totalSuccess++;
                 } catch (err) {
                     addLog({
@@ -1015,6 +1060,8 @@
                         title: video.title,
                         message: `下载失败: ${err.message}`,
                     });
+                    sessionLines.push(`❌ ${video.title}`);
+                    sessionLines.push(`   ${video.bvid}  失败: ${err.message}`);
                     totalFail++;
                 }
 
@@ -1026,6 +1073,12 @@
 
             const summary = `轮询完成: ${totalSuccess} 成功, ${totalFail} 失败`;
             addLog({ type: totalFail > 0 ? 'error' : 'success', message: summary });
+
+            // 生成本次轮询的日志文件
+            sessionLines.push('─'.repeat(50));
+            sessionLines.push(`合计: ${totalSuccess} 成功, ${totalFail} 失败`);
+            const logContent = sessionLines.join('\n');
+            downloadFile(`轮询日志_${pollFolder}.txt`, logContent);
 
             // 发送桌面通知
             try {
@@ -1039,6 +1092,7 @@
         } catch (err) {
             addLog({ type: 'error', message: `轮询失败: ${err.message}` });
         } finally {
+            GM_setValue(STORAGE_KEYS.POLL_RUNNING, 0); // 释放全局轮询锁
             isPolling = false;
             updatePollStatusUI();
         }
@@ -1144,12 +1198,27 @@
      * 其余标签页保持静默，避免 N 个标签页同时跑定时器。
      */
     function tryAcquireSchedulerLock() {
+        // 先检查是否已有「新鲜」的持锁者（2 分钟内）
+        // 如果有，直接放弃竞争——这是此前缺失的关键逸辑
+        const existingTs = GM_getValue(STORAGE_KEYS.ACTIVE_TAB_TS, 0);
+        const existingToken = GM_getValue(STORAGE_KEYS.ACTIVE_TAB_TOKEN, '');
+        const LOCK_GRACE_MS = 2 * 60 * 1000; // 2 分钟内认为锁仍有效
+        if (existingToken && Date.now() - existingTs < LOCK_GRACE_MS) {
+            return Promise.resolve(false); // 已有活跃持锁者，让路
+        }
+
+        // 没有活跃持锁者，开始竞争
         GM_setValue(STORAGE_KEYS.ACTIVE_TAB_TOKEN, MY_TAB_TOKEN);
-        // 稍等片刻，如果被其他标签页覆盖则放弃
+        GM_setValue(STORAGE_KEYS.ACTIVE_TAB_TS, Date.now());
         return new Promise(resolve => {
             setTimeout(() => {
-                resolve(GM_getValue(STORAGE_KEYS.ACTIVE_TAB_TOKEN, '') === MY_TAB_TOKEN);
-            }, 200 + Math.random() * 300); // 200-500ms 随机延迟，减少竞争碰撞
+                const won = GM_getValue(STORAGE_KEYS.ACTIVE_TAB_TOKEN, '') === MY_TAB_TOKEN;
+                if (won) {
+                    // 将锁时间戳更新为当前，确认自己是持锁者
+                    GM_setValue(STORAGE_KEYS.ACTIVE_TAB_TS, Date.now());
+                }
+                resolve(won);
+            }, 200 + Math.random() * 300);
         });
     }
 
@@ -1200,6 +1269,8 @@
         pollTimer = setInterval(() => {
             wakeCount++;
             updateDiag();
+            // 续期调度锁（让后就的标签页知道已有活跃持锁者）
+            GM_setValue(STORAGE_KEYS.ACTIVE_TAB_TS, Date.now());
             const nowEnabled = GM_getValue(STORAGE_KEYS.POLL_ENABLED, false);
             if (!nowEnabled) { clearInterval(pollTimer); pollTimer = null; return; }
             // 失去锁时停止（说明有新标签页接管）
