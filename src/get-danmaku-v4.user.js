@@ -133,6 +133,50 @@
         setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
     }
 
+    function downloadVideo(filename, url, metadata, folder = '') {
+        if (!serverAvailable) return;
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: `${SERVER_URL}/download-video`,
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            data: JSON.stringify({ folder, filename, url, metadata }),
+            onload: (res) => {
+                try {
+                    const result = JSON.parse(res.responseText);
+                    if (result.skipped) {
+                        console.log('[弹幕下载器] 视频已存在，跳过');
+                    } else if (result.ok) {
+                        console.log('[弹幕下载器] 已触发服务器下载视频:', filename);
+                    }
+                } catch(e) {}
+            }
+        });
+    }
+
+    async function fetchVideoUrl(bvid, cid) {
+        try {
+            let data = await fetchJson(`https://api.bilibili.com/x/player/playurl?bvid=${bvid}&cid=${cid}&qn=112&fnval=1`);
+            // 尝试 PGC (番剧) 接口 fallback
+            if (data.code !== 0 || !data.data?.durl) {
+                const pgcData = await fetchJson(`https://api.bilibili.com/pgc/player/web/playurl?bvid=${bvid}&cid=${cid}&qn=112&fnval=1`);
+                if (pgcData.code === 0 && pgcData.result?.durl) {
+                    data = { code: 0, data: pgcData.result }; // 归一下数据结构
+                }
+            }
+            
+            if (data.code === 0 && data.data?.durl?.length > 0) {
+                return data.data.durl[0].url;
+            } else {
+                console.error('[弹幕下载器] URL获取失败:', data);
+                addLog({ type: 'error', bvid, message: `获取流失败: ${data.message || '未知错误'}` });
+            }
+        } catch(e) { 
+            console.error('[弹幕下载器] 视频地址请求异常', e); 
+            addLog({ type: 'error', bvid, message: `请求异常: ${e.message}` });
+        }
+        return null;
+    }
+
     function checkServer() {
         GM_xmlhttpRequest({
             method: 'GET', url: `${SERVER_URL}/health`,
@@ -864,7 +908,20 @@
             const mainTitle = sanitizeFilename(data.data.title);
             const pages = data.data.pages;
 
-            videoInfo = { title: mainTitle, bvId, pages };
+            videoInfo = { 
+                title: mainTitle, 
+                bvId, 
+                pages,
+                metadata: {
+                    bvid: bvId,
+                    title: data.data.title,
+                    cover: data.data.pic,
+                    uploader: data.data.owner?.name,
+                    pubdate: data.data.pubdate,
+                    desc: data.data.desc,
+                    updateTime: Date.now()
+                }
+            };
 
             videoTitleEl.textContent = data.data.title;
             partsTagEl.textContent = `${pages.length} P`;
@@ -908,6 +965,12 @@
             setStatus(`✅ 全部完成！共下载 ${succCount} 个文件`, 'success');
         } else {
             setStatus(`完成：${succCount} 成功, ${failCount} 失败`, 'error');
+        }
+        
+        // 并行触发视频下载
+        const videoUrl = await fetchVideoUrl(bvId, pages[0].cid);
+        if (videoUrl) {
+            downloadVideo(`${title}_${bvId}.mp4`, videoUrl, videoInfo.metadata);
         }
     }
 
@@ -958,6 +1021,12 @@
         resetProgress();
         setVideoButtonsDisabled(false);
         setStatus(`✅ 合并完成！共 ${allDanmaku.length} 条弹幕`, 'success');
+
+        // 并行触发视频下载
+        const videoUrl = await fetchVideoUrl(bvId, pages[0].cid);
+        if (videoUrl) {
+            downloadVideo(`${title}_${bvId}.mp4`, videoUrl, videoInfo.metadata);
+        }
     }
 
     btnSplit.addEventListener('click', downloadSplit);
@@ -1035,8 +1104,19 @@
     ${allDanmaku.join('\n    ')}
 </i>`;
 
+        const metadata = {
+            bvid: bvId,
+            title: viewData.data.title,
+            cover: viewData.data.pic,
+            uploader: viewData.data.owner?.name,
+            pubdate: viewData.data.pubdate,
+            desc: viewData.data.desc,
+            updateTime: Date.now()
+        };
+        const videoUrl = await fetchVideoUrl(bvId, pages[0].cid);
+
         const fileName = `${title}_[全集合并]_${bvId}.xml`;
-        return { fileName, mergedXml, title: viewData.data.title, danmakuCount: allDanmaku.length, pages: pages.length };
+        return { fileName, mergedXml, title: viewData.data.title, danmakuCount: allDanmaku.length, pages: pages.length, metadata, videoUrl };
     }
 
     /**
@@ -1085,7 +1165,11 @@
 
                 try {
                     const result = await fetchMergedDanmakuForVideo(video.bvid);
-                    downloadFile(result.fileName, result.mergedXml);
+                    downloadFile(result.fileName, result.mergedXml, pollFolder);
+                    
+                    if (result.videoUrl) {
+                        downloadVideo(`${sanitizeFilename(result.title)}_${video.bvid}.mp4`, result.videoUrl, result.metadata, pollFolder);
+                    }
 
                     addLog({
                         type: 'success',
