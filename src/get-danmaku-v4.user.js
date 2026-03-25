@@ -12,6 +12,7 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_notification
+// @grant        GM_cookie
 // @connect      api.bilibili.com
 // @connect      comment.bilibili.com
 // @connect      127.0.0.1
@@ -133,50 +134,91 @@
         setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
     }
 
-    function downloadVideo(filename, url, metadata, folder = '') {
-        if (!serverAvailable) return;
-        GM_xmlhttpRequest({
-            method: 'POST',
-            url: `${SERVER_URL}/download-video`,
-            headers: { 'Content-Type': 'application/json; charset=utf-8' },
-            data: JSON.stringify({ folder, filename, url, metadata }),
-            onload: (res) => {
-                try {
-                    const result = JSON.parse(res.responseText);
-                    if (result.skipped) {
-                        console.log('[弹幕下载器] 视频已存在，跳过');
-                    } else if (result.ok) {
-                        console.log('[弹幕下载器] 已触发服务器下载视频:', filename);
-                    }
-                } catch(e) {}
-            }
+    function listCookiesForUrl(url) {
+        return new Promise(resolve => {
+            GM_cookie.list({ url }, (cookies, error) => {
+                if (error || !cookies) {
+                    resolve([]);
+                    return;
+                }
+                resolve(cookies);
+            });
         });
     }
 
-    async function fetchVideoUrl(bvid, cid) {
-        try {
-            let data = await fetchJson(`https://api.bilibili.com/x/player/playurl?bvid=${bvid}&cid=${cid}&qn=112&fnval=1`);
-            // 尝试 PGC (番剧) 接口 fallback
-            if (data.code !== 0 || !data.data?.durl) {
-                const pgcData = await fetchJson(`https://api.bilibili.com/pgc/player/web/playurl?bvid=${bvid}&cid=${cid}&qn=112&fnval=1`);
-                if (pgcData.code === 0 && pgcData.result?.durl) {
-                    data = { code: 0, data: pgcData.result }; // 归一下数据结构
-                }
-            }
-            
-            if (data.code === 0 && data.data?.durl?.length > 0) {
-                return data.data.durl[0].url;
-            } else {
-                console.error('[弹幕下载器] URL获取失败:', data);
-                addLog({ type: 'error', bvid, message: `获取流失败: ${data.message || '未知错误'}` });
-            }
-        } catch(e) { 
-            console.error('[弹幕下载器] 视频地址请求异常', e); 
-            addLog({ type: 'error', bvid, message: `请求异常: ${e.message}` });
-        }
-        return null;
+    async function collectBilibiliCookies() {
+        if (typeof GM_cookie === 'undefined') return [];
+
+        const urls = [
+            'https://www.bilibili.com/',
+            'https://bilibili.com/',
+            'https://api.bilibili.com/',
+            'https://passport.bilibili.com/',
+        ];
+
+        const groups = await Promise.all(urls.map(listCookiesForUrl));
+        const merged = new Map();
+
+        groups.flat().forEach(cookie => {
+            if (!cookie?.name) return;
+
+            const key = [
+                cookie.domain || '',
+                cookie.path || '/',
+                cookie.name,
+                cookie.storeId || '',
+            ].join('|');
+
+            merged.set(key, {
+                name: cookie.name,
+                value: cookie.value,
+                domain: cookie.domain || '',
+                path: cookie.path || '/',
+                secure: !!cookie.secure,
+                httpOnly: !!cookie.httpOnly,
+                hostOnly: !!cookie.hostOnly,
+                session: !!cookie.session,
+                expirationDate: cookie.expirationDate || 0,
+            });
+        });
+
+        return [...merged.values()];
     }
 
+    function downloadVideo(filename, metadata) {
+        if (!serverAvailable) return;
+
+        const sendPayload = (cookies) => {
+            const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: `${SERVER_URL}/download-video`,
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                data: JSON.stringify({ filename, metadata, cookies, cookieStr }),
+                onload: (res) => {
+                    try {
+                        const result = JSON.parse(res.responseText);
+                        if (result.skipped) {
+                            console.log('[弹幕下载器] 视频已存在，跳过');
+                        } else if (result.ok) {
+                            console.log('[弹幕下载器] 已触发服务器下载视频:', filename);
+                        }
+                    } catch(e) {}
+                }
+            });
+        };
+
+        if (typeof GM_cookie !== 'undefined') {
+            collectBilibiliCookies()
+                .then(cookies => sendPayload(cookies))
+                .catch(err => {
+                    console.warn('[弹幕下载器] 读取 Cookie 失败，将使用空 Cookie:', err);
+                    sendPayload([]);
+                });
+        } else {
+            sendPayload([]);
+        }
+    }
     function checkServer() {
         GM_xmlhttpRequest({
             method: 'GET', url: `${SERVER_URL}/health`,
@@ -967,11 +1009,8 @@
             setStatus(`完成：${succCount} 成功, ${failCount} 失败`, 'error');
         }
         
-        // 并行触发视频下载
-        const videoUrl = await fetchVideoUrl(bvId, pages[0].cid);
-        if (videoUrl) {
-            downloadVideo(`${title}_${bvId}.mp4`, videoUrl, videoInfo.metadata);
-        }
+        // 后台触发全局视频下载
+        downloadVideo(`${title}_${bvId}.mp4`, videoInfo.metadata);
     }
 
     async function downloadMerge() {
@@ -1022,11 +1061,8 @@
         setVideoButtonsDisabled(false);
         setStatus(`✅ 合并完成！共 ${allDanmaku.length} 条弹幕`, 'success');
 
-        // 并行触发视频下载
-        const videoUrl = await fetchVideoUrl(bvId, pages[0].cid);
-        if (videoUrl) {
-            downloadVideo(`${title}_${bvId}.mp4`, videoUrl, videoInfo.metadata);
-        }
+        // 后台触发全局视频下载
+        downloadVideo(`${title}_${bvId}.mp4`, videoInfo.metadata);
     }
 
     btnSplit.addEventListener('click', downloadSplit);
@@ -1113,10 +1149,8 @@
             desc: viewData.data.desc,
             updateTime: Date.now()
         };
-        const videoUrl = await fetchVideoUrl(bvId, pages[0].cid);
-
         const fileName = `${title}_[全集合并]_${bvId}.xml`;
-        return { fileName, mergedXml, title: viewData.data.title, danmakuCount: allDanmaku.length, pages: pages.length, metadata, videoUrl };
+        return { fileName, mergedXml, title: viewData.data.title, danmakuCount: allDanmaku.length, pages: pages.length, metadata };
     }
 
     /**
@@ -1166,10 +1200,7 @@
                 try {
                     const result = await fetchMergedDanmakuForVideo(video.bvid);
                     downloadFile(result.fileName, result.mergedXml, pollFolder);
-                    
-                    if (result.videoUrl) {
-                        downloadVideo(`${sanitizeFilename(result.title)}_${video.bvid}.mp4`, result.videoUrl, result.metadata, pollFolder);
-                    }
+                    downloadVideo(`${sanitizeFilename(result.title)}_${video.bvid}.mp4`, result.metadata);
 
                     addLog({
                         type: 'success',
