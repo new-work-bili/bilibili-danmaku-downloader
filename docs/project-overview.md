@@ -59,7 +59,7 @@
   - 超过 `1 GiB` 时自动降档
 - 数据展示
   - 保存 `title / cover / uploader / bvid / updateTime` 等元数据
-  - WebUI 展示与本地播放
+  - WebUI 展示、本地播放、排序筛选与 B 站跳转
 
 ## 适合先读什么
 

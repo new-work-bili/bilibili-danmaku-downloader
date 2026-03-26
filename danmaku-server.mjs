@@ -13,7 +13,7 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { exec, spawn } from 'child_process';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { selectVideoDownloadPlan, summarizeSelectedFormat } from './src/video-format-selector.mjs';
 
@@ -80,6 +80,12 @@ function resolveWithinBase(relativePath = '.') {
     return ensureInsideBase(path.resolve(BASE_DIR_RESOLVED, path.normalize(relativePath)));
 }
 
+function normalizeTimestamp(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return null;
+    return numeric < 1e12 ? numeric * 1000 : numeric;
+}
+
 function toSafePathSegment(value, fallback = 'untitled') {
     const sanitized = path.basename(String(value || fallback)).replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
     return sanitized || fallback;
@@ -107,6 +113,21 @@ function buildFilesUrlPrefix(dirPath) {
         .map(segment => encodeURIComponent(segment))
         .join('/');
     return encoded ? `/files/${encoded}/` : '/files/';
+}
+
+function buildBilibiliVideoUrl(bvid, page) {
+    if (!bvid) return '';
+    const pageSuffix = Number(page) > 1 ? `?p=${Number(page)}` : '';
+    return `https://www.bilibili.com/video/${bvid}${pageSuffix}`;
+}
+
+function buildBilibiliUploaderUrl(uploaderMid) {
+    const mid = String(uploaderMid || '').trim();
+    return mid ? `https://space.bilibili.com/${mid}` : '';
+}
+
+function escapePowerShellSingleQuoted(value) {
+    return String(value || '').replace(/'/g, "''");
 }
 
 function formatBytes(bytes) {
@@ -464,31 +485,39 @@ function listGroupedVideoCards() {
             const cardKey = info.bvid || groupDir;
             const videoPath = findDownloadedVideoByBaseName(partDir, baseName);
             const videoFile = videoPath ? path.basename(videoPath) : null;
+            const favoriteTime = normalizeTimestamp(info.favoriteTime || info.favTime);
+            const publishTime = normalizeTimestamp(info.publishTime || info.pubdate);
             let danmakuFile = null;
+            let danmakuPath = null;
             try {
                 const danmakuDir = resolveWithinBase(path.join('danmaku', groupDir));
-                const danmakuPath = path.join(danmakuDir, `${baseName}.xml`);
-                if (fs.existsSync(danmakuPath)) {
-                    danmakuFile = path.basename(danmakuPath);
+                const matchedDanmakuPath = path.join(danmakuDir, `${baseName}.xml`);
+                if (fs.existsSync(matchedDanmakuPath)) {
+                    danmakuPath = matchedDanmakuPath;
+                    danmakuFile = path.basename(matchedDanmakuPath);
                 }
             } catch (_) {
+                danmakuPath = null;
                 danmakuFile = null;
             }
 
-            const partUpdateTime = info.updateTime
-                || info.downloadFinishedAt
-                || info.lastResolvedAt
+            const partUpdateTime = normalizeTimestamp(info.updateTime)
+                || normalizeTimestamp(info.downloadFinishedAt)
+                || normalizeTimestamp(info.lastResolvedAt)
                 || stat.mtimeMs;
             const part = {
                 page: Number(info.page) || 1,
                 partTitle: info.partTitle || `P${Number(info.page) || 1}`,
                 videoFile,
+                videoPath,
                 danmakuFile,
+                danmakuPath,
                 downloadStatus: info.downloadStatus || 'unknown',
                 fileUrlPrefix: buildFilesUrlPrefix(partDir),
                 updateTime: partUpdateTime,
                 folderPath: partDir,
                 filename: baseName,
+                videoUrl: buildBilibiliVideoUrl(info.bvid, info.page),
             };
 
             if (!cards.has(cardKey)) {
@@ -497,10 +526,15 @@ function listGroupedVideoCards() {
                     title: info.title || groupDir,
                     cover: info.cover || '',
                     uploader: info.uploader || '',
+                    uploaderMid: info.uploaderMid || '',
+                    uploaderUrl: buildBilibiliUploaderUrl(info.uploaderMid),
+                    videoUrl: buildBilibiliVideoUrl(info.bvid),
                     folderPath: partDir,
                     groupDir,
                     partCount: Number(info.partCount) || 0,
                     hasMultipleParts: Boolean(info.hasMultipleParts),
+                    favoriteTime,
+                    publishTime,
                     updateTime: partUpdateTime,
                     parts: [],
                     partMap: new Map(),
@@ -508,7 +542,15 @@ function listGroupedVideoCards() {
             }
 
             const card = cards.get(cardKey);
+            card.title = card.title || info.title || groupDir;
+            card.cover = card.cover || info.cover || '';
             card.folderPath = partDir;
+            card.uploader = card.uploader || info.uploader || '';
+            card.uploaderMid = card.uploaderMid || info.uploaderMid || '';
+            card.uploaderUrl = card.uploaderUrl || buildBilibiliUploaderUrl(card.uploaderMid);
+            card.videoUrl = card.videoUrl || buildBilibiliVideoUrl(info.bvid);
+            card.favoriteTime = card.favoriteTime || favoriteTime;
+            card.publishTime = card.publishTime || publishTime;
             card.partCount = Math.max(card.partCount, Number(info.partCount) || 0, card.parts.length + 1);
             card.hasMultipleParts = card.hasMultipleParts || Boolean(info.hasMultipleParts);
             card.updateTime = Math.max(card.updateTime || 0, partUpdateTime || 0);
@@ -527,9 +569,131 @@ function listGroupedVideoCards() {
             delete card.partMap;
             card.partCount = Math.max(card.partCount, card.parts.length);
             card.hasMultipleParts = card.hasMultipleParts || card.partCount > 1;
+            const primaryPart = card.parts.find(part => part.videoPath) || card.parts[0] || null;
+            card.primaryVideoPath = primaryPart?.videoPath || null;
+            const primaryDanmakuPart = card.parts.find(part => part.danmakuPath) || card.parts[0] || null;
+            card.primaryDanmakuPath = primaryDanmakuPart?.danmakuPath || null;
             return card;
         })
         .sort((a, b) => (b.updateTime || 0) - (a.updateTime || 0));
+}
+
+function spawnDetached(command, args) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(command, args, {
+            windowsHide: true,
+            detached: true,
+            stdio: 'ignore',
+        });
+
+        child.once('error', reject);
+        child.once('spawn', () => {
+            child.unref();
+            resolve();
+        });
+    });
+}
+
+function runCommand(command, args) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(command, args, {
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        let stdoutBuf = '';
+        let stderrBuf = '';
+        child.stdout.on('data', chunk => {
+            stdoutBuf += chunk.toString();
+        });
+        child.stderr.on('data', chunk => {
+            stderrBuf += chunk.toString();
+        });
+        child.once('error', reject);
+        child.once('close', (code) => {
+            if (code === 0) {
+                resolve({ stdout: stdoutBuf, stderr: stderrBuf });
+                return;
+            }
+            reject(new Error((stderrBuf || stdoutBuf || `exit ${code}`).trim()));
+        });
+    });
+}
+
+async function revealPathInFileManager(folderPath, filePath = '') {
+    const safeFolder = ensureInsideBase(folderPath);
+    const safeFile = filePath ? ensureInsideBase(filePath) : '';
+    const targetFile = safeFile && fs.existsSync(safeFile) ? safeFile : '';
+
+    if (process.platform === 'win32') {
+        if (targetFile) {
+            const escapedFile = escapePowerShellSingleQuoted(targetFile);
+            await runCommand('powershell.exe', [
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                [
+                    "$ErrorActionPreference = 'Stop'",
+                    "Add-Type -TypeDefinition @'",
+                    'using System;',
+                    'using System.Runtime.InteropServices;',
+                    'public static class FolderRevealNative {',
+                    '    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]',
+                    '    public static extern int SHParseDisplayName(string name, IntPtr pbc, out IntPtr ppidl, uint sfgaoIn, out uint psfgaoOut);',
+                    '    [DllImport("shell32.dll")]',
+                    '    public static extern int SHOpenFolderAndSelectItems(IntPtr pidlFolder, uint cidl, IntPtr[] apidl, uint dwFlags);',
+                    '    [DllImport("shell32.dll")]',
+                    '    public static extern IntPtr ILClone(IntPtr pidl);',
+                    '    [DllImport("shell32.dll")]',
+                    '    public static extern bool ILRemoveLastID(IntPtr pidl);',
+                    '    [DllImport("shell32.dll")]',
+                    '    public static extern IntPtr ILFindLastID(IntPtr pidl);',
+                    '    [DllImport("shell32.dll")]',
+                    '    public static extern void ILFree(IntPtr pidl);',
+                    '}',
+                    "'@",
+                    `$target = '${escapedFile}'`,
+                    "if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'target file missing' }",
+                    '[uint32]$attrs = 0',
+                    '$itemPidl = [IntPtr]::Zero',
+                    '$folderPidl = [IntPtr]::Zero',
+                    'try {',
+                    '    $parseResult = [FolderRevealNative]::SHParseDisplayName($target, [IntPtr]::Zero, [ref]$itemPidl, 0, [ref]$attrs)',
+                    "    if ($parseResult -ne 0 -or $itemPidl -eq [IntPtr]::Zero) { throw 'SHParseDisplayName failed' }",
+                    '    $folderPidl = [FolderRevealNative]::ILClone($itemPidl)',
+                    "    if ($folderPidl -eq [IntPtr]::Zero) { throw 'ILClone failed' }",
+                    "    if (-not [FolderRevealNative]::ILRemoveLastID($folderPidl)) { throw 'ILRemoveLastID failed' }",
+                    '    $child = [FolderRevealNative]::ILFindLastID($itemPidl)',
+                    '    $openResult = [FolderRevealNative]::SHOpenFolderAndSelectItems($folderPidl, 1, @($child), 0)',
+                    "    if ($openResult -ne 0) { throw ('SHOpenFolderAndSelectItems failed: ' + $openResult) }",
+                    '} finally {',
+                    '    if ($folderPidl -ne [IntPtr]::Zero) { [FolderRevealNative]::ILFree($folderPidl) }',
+                    '    if ($itemPidl -ne [IntPtr]::Zero) { [FolderRevealNative]::ILFree($itemPidl) }',
+                    '}',
+                ].join('\n'),
+            ]);
+            return;
+        }
+        const escapedFolder = escapePowerShellSingleQuoted(safeFolder);
+        await runCommand('powershell.exe', [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `$target='${escapedFolder}'; Invoke-Item -LiteralPath $target`,
+        ]);
+        return;
+    }
+
+    if (process.platform === 'darwin') {
+        if (targetFile) {
+            await spawnDetached('open', ['-R', targetFile]);
+            return;
+        }
+        await spawnDetached('open', [safeFolder]);
+        return;
+    }
+
+    await spawnDetached('xdg-open', [targetFile ? path.dirname(targetFile) : safeFolder]);
 }
 
 function getSelectedDynamicRangeRank(dynamicRange) {
@@ -885,21 +1049,11 @@ const server = http.createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/api/open-folder') {
         let body = '';
         req.on('data', chunk => (body += chunk));
-        req.on('end', () => {
+        req.on('end', async () => {
             try {
-                const { folder } = JSON.parse(body);
+                const { folder, file } = JSON.parse(body);
                 if (!folder) throw new Error('folder 不能为空');
-                const safeFolder = ensureInsideBase(folder);
-                
-                const command = process.platform === 'win32'
-                    ? `explorer "${safeFolder}"`
-                    : process.platform === 'darwin'
-                        ? `open "${safeFolder}"`
-                        : `xdg-open "${safeFolder}"`;
-                        
-                exec(command, { windowsHide: true }, (err) => {
-                    if (err) console.error('[❌ 打开文件夹失败]', err.message);
-                });
+                await revealPathInFileManager(folder, file);
                 json(res, 200, { ok: true });
             } catch (err) {
                 json(res, 500, { ok: false, error: err.message });

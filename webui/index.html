@@ -28,6 +28,23 @@
         </header>
 
         <main class="main-content">
+            <section id="toolbar" class="toolbar hidden">
+                <div class="toolbar-group">
+                    <label for="sort-select">排序</label>
+                    <select id="sort-select" class="toolbar-select">
+                        <option value="updateTime">更新弹幕时间</option>
+                        <option value="favoriteTime">添加收藏时间</option>
+                        <option value="publishTime">视频发布时间</option>
+                    </select>
+                </div>
+                <div class="toolbar-group">
+                    <label for="uploader-select">UP主筛选</label>
+                    <select id="uploader-select" class="toolbar-select">
+                        <option value="__all__">全部UP主</option>
+                    </select>
+                </div>
+            </section>
+
             <!-- Loader -->
             <div id="loader" class="loader-container">
                 <div class="spinner"></div>
@@ -44,7 +61,7 @@
             <!-- Empty State -->
             <div id="empty-state" class="state-container hidden">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-                <p>暂无下载的视频或弹幕</p>
+                <p id="empty-msg">暂无下载的视频或弹幕</p>
             </div>
 
             <!-- Grid -->

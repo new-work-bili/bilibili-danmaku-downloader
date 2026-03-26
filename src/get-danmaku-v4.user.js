@@ -121,7 +121,13 @@
         return `${sanitizeFilename(title)}_[全集合并]_${bvId}.xml`;
     }
 
-    function buildVideoTaskFromPage(videoData, pageInfo) {
+    function normalizeTimestamp(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric) || numeric <= 0) return null;
+        return numeric < 1e12 ? numeric * 1000 : numeric;
+    }
+
+    function buildVideoTaskFromPage(videoData, pageInfo, extras = {}) {
         const groupDir = buildGroupDir(videoData.title, videoData.bvid);
         const hasMultipleParts = (videoData.pages || []).length > 1;
         const baseName = buildPartBaseName(videoData, pageInfo);
@@ -132,7 +138,10 @@
                 title: videoData.title,
                 cover: videoData.cover,
                 uploader: videoData.uploader,
+                uploaderMid: videoData.uploaderMid,
                 pubdate: videoData.pubdate,
+                publishTime: normalizeTimestamp(videoData.pubdate),
+                favoriteTime: normalizeTimestamp(extras.favoriteTime),
                 desc: videoData.desc,
                 updateTime: Date.now(),
                 page: pageInfo.page,
@@ -146,8 +155,8 @@
         };
     }
 
-    function buildVideoTasks(videoData) {
-        return (videoData.pages || []).map(page => buildVideoTaskFromPage(videoData, page));
+    function buildVideoTasks(videoData, extras = {}) {
+        return (videoData.pages || []).map(page => buildVideoTaskFromPage(videoData, page, extras));
     }
 
     /**
@@ -382,6 +391,7 @@
             title: viewData.data.title,
             cover: viewData.data.pic,
             uploader: viewData.data.owner?.name,
+            uploaderMid: viewData.data.owner?.mid,
             pubdate: viewData.data.pubdate,
             desc: viewData.data.desc,
             pages: viewData.data.pages || [],
@@ -443,8 +453,8 @@
         };
     }
 
-    function queueVideoDownloads(videoData) {
-        const tasks = buildVideoTasks(videoData);
+    function queueVideoDownloads(videoData, extras = {}) {
+        const tasks = buildVideoTasks(videoData, extras);
         tasks.forEach(task => downloadVideo(task.filename, task.metadata));
         return tasks;
     }
@@ -469,6 +479,7 @@
                         bvid: item.bv_id || item.bvid,
                         title: item.title,
                         page: item.page, // 分P数
+                        favoriteTime: item.fav_time || item.ctime || item.mtime || 0,
                     });
                 }
             }
@@ -1299,7 +1310,9 @@
                         }
                     }
 
-                    queueVideoDownloads(videoData);
+                    queueVideoDownloads(videoData, {
+                        favoriteTime: video.favoriteTime,
+                    });
 
                     addLog({
                         type: successfulParts.length === parts.length ? 'success' : 'error',

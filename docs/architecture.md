@@ -86,8 +86,9 @@ v3 / v4 共用一套租约锁模型，目标是保证同一时刻只有一个标
 职责：
 
 - 按 BV 聚合展示本地视频卡片
+- 提供排序、筛选和外链跳转
 - 通过详情弹层查看分 P 列表并播放指定分 P
-- 打开视频所在文件夹
+- 打开视频所在文件夹并尽量选中对应视频文件
 
 关键文件：
 
@@ -131,6 +132,9 @@ v3 / v4 共用一套租约锁模型，目标是保证同一时刻只有一个标
 - `hasMultipleParts`
 - `cover`
 - `uploader`
+- `uploaderMid`
+- `favoriteTime`
+- `publishTime`
 - `videoPath`
 - `selectedFormat`
 - `downloadStatus`

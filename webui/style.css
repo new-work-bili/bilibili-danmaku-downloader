@@ -93,6 +93,48 @@ h1 span {
     gap: 16px;
 }
 
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(14px);
+}
+
+.toolbar-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 220px;
+}
+
+.toolbar-group label {
+    font-size: 12px;
+    color: var(--text-sec);
+    letter-spacing: 0.03em;
+}
+
+.toolbar-select {
+    appearance: none;
+    background: rgba(8, 10, 14, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-main);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-size: 14px;
+    outline: none;
+}
+
+.toolbar-select:focus {
+    border-color: rgba(251, 114, 153, 0.4);
+    box-shadow: 0 0 0 3px rgba(251, 114, 153, 0.12);
+}
+
 .badge {
     background: rgba(255, 255, 255, 0.05);
     padding: 6px 14px;
@@ -106,6 +148,7 @@ h1 span {
 .btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
     padding: 10px 20px;
     border-radius: var(--radius-sm);
@@ -115,6 +158,7 @@ h1 span {
     transition: all 0.2s ease;
     border: none;
     outline: none;
+    text-decoration: none;
 }
 
 .btn-primary {
@@ -138,6 +182,12 @@ h1 span {
 .btn-outline:hover {
     background-color: rgba(255, 255, 255, 0.05);
     border-color: rgba(255, 255, 255, 0.15);
+}
+
+.btn.disabled,
+.action-link.disabled {
+    opacity: 0.45;
+    pointer-events: none;
 }
 
 /* Main States */
@@ -320,16 +370,54 @@ h1 span {
     color: var(--text-muted);
 }
 
+.card-up-link {
+    color: inherit;
+    text-decoration: none;
+    transition: color 0.2s ease;
+}
+
+.card-up-link:hover {
+    color: #ffd0dc;
+}
+
+.card-time-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.card-time-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+}
+
+.card-time-label {
+    color: var(--text-muted);
+}
+
+.card-time-value {
+    color: #d7dce4;
+    text-align: right;
+}
+
 .card-actions {
     display: flex;
     gap: 10px;
     margin-top: 14px;
+    flex-wrap: wrap;
 }
 
 .btn-card-detail,
-.btn-card-folder {
-    flex: 1;
-    justify-content: center;
+.btn-card-folder,
+.btn-card-link,
+.btn-card-danmaku {
+    flex: 1 1 calc(50% - 6px);
 }
 
 .card-meta-row {
@@ -372,6 +460,7 @@ h1 span {
     display: flex;
     gap: 6px;
 }
+
 .status-dot {
     width: 8px;
     height: 8px;
@@ -470,10 +559,13 @@ h1 span {
     display: flex;
     gap: 8px;
     flex-shrink: 0;
+    flex-wrap: wrap;
 }
 
 .btn-part-play,
-.btn-part-folder {
+.btn-part-folder,
+.btn-part-link,
+.btn-part-danmaku {
     padding: 8px 14px;
 }
 
@@ -552,12 +644,29 @@ h1 span {
 .detail-summary-chip {
     display: inline-flex;
     align-items: center;
+    gap: 8px;
     padding: 6px 12px;
     border-radius: 999px;
     font-size: 12px;
     color: var(--text-sec);
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.08);
+    text-decoration: none;
+}
+
+.detail-summary-label {
+    color: var(--text-muted);
+}
+
+.detail-summary-value {
+    color: #eef2f7;
+}
+
+.detail-action-bar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
 }
 
 .btn-icon {
@@ -606,6 +715,14 @@ h1 span {
         justify-content: space-between;
     }
 
+    .toolbar {
+        padding: 14px;
+    }
+
+    .toolbar-group {
+        min-width: 100%;
+    }
+
     .video-grid {
         grid-template-columns: 1fr;
         gap: 18px;
@@ -622,8 +739,12 @@ h1 span {
 
     .btn-part-play,
     .btn-part-folder,
+    .btn-part-link,
+    .btn-part-danmaku,
     .btn-card-detail,
-    .btn-card-folder {
+    .btn-card-folder,
+    .btn-card-link,
+    .btn-card-danmaku {
         flex: 1;
         justify-content: center;
     }
