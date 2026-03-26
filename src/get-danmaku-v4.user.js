@@ -92,36 +92,121 @@
         });
     }
 
+    function buildGroupDir(title, bvId) {
+        return `${sanitizeFilename(title)}_${bvId}`;
+    }
+
+    function getDanmakuFolder(groupDir) {
+        return `danmaku/${groupDir}`;
+    }
+
+    function getDanmakuLogFolder() {
+        return 'danmaku/logs';
+    }
+
+    function getPartLabel(partTitle) {
+        return sanitizeFilename(partTitle || '未命名分P');
+    }
+
+    function buildPartBaseName(videoData, pageInfo) {
+        const title = sanitizeFilename(videoData.title || videoData.bvid || 'video');
+        return `${title}_P${pageInfo.page}_${getPartLabel(pageInfo.part)}_${videoData.bvid}`;
+    }
+
+    function buildPartXmlFileName(videoData, pageInfo) {
+        return `${buildPartBaseName(videoData, pageInfo)}.xml`;
+    }
+
+    function buildMergedXmlFileName(title, bvId) {
+        return `${sanitizeFilename(title)}_[全集合并]_${bvId}.xml`;
+    }
+
+    function buildVideoTaskFromPage(videoData, pageInfo) {
+        const groupDir = buildGroupDir(videoData.title, videoData.bvid);
+        const hasMultipleParts = (videoData.pages || []).length > 1;
+        const baseName = buildPartBaseName(videoData, pageInfo);
+        return {
+            filename: `${baseName}.mp4`,
+            metadata: {
+                bvid: videoData.bvid,
+                title: videoData.title,
+                cover: videoData.cover,
+                uploader: videoData.uploader,
+                pubdate: videoData.pubdate,
+                desc: videoData.desc,
+                updateTime: Date.now(),
+                page: pageInfo.page,
+                cid: pageInfo.cid,
+                partTitle: pageInfo.part || `P${pageInfo.page}`,
+                partCount: (videoData.pages || []).length,
+                hasMultipleParts,
+                groupDir,
+                baseName,
+            },
+        };
+    }
+
+    function buildVideoTasks(videoData) {
+        return (videoData.pages || []).map(page => buildVideoTaskFromPage(videoData, page));
+    }
+
     /**
      * 发送文件到本地服务（danmaku-server.mjs）写入磁盘。
      * 服务不可用时自动降级到浏览器内置下载（文件名正确，无子文件夹）。
      * @param {string} filename  文件名（不含路径）
      * @param {string} content   文件内容
      * @param {string} [folder]  可选子文件夹，仅服务模式有效
+     * @returns {Promise<{ok: boolean, path?: string, fallback?: boolean, time: number}>}
      */
     function downloadFile(filename, content, folder = '') {
-        if (serverAvailable) {
-            GM_xmlhttpRequest({
-                method: 'POST',
-                url: `${SERVER_URL}/save`,
-                headers: { 'Content-Type': 'application/json; charset=utf-8' },
-                data: JSON.stringify({ folder, filename, content }),
-                timeout: 10000,
-                onload: (res) => {
-                    try {
-                        const result = JSON.parse(res.responseText);
-                        if (!result.ok) {
-                            console.error('[弹幕下载器] 服务端写入失败，降级:', result.error);
+        return new Promise(resolve => {
+            const finish = (result = {}) => {
+                resolve({
+                    ok: result.ok !== false,
+                    path: result.path,
+                    fallback: !!result.fallback,
+                    time: Date.now(),
+                });
+            };
+
+            if (serverAvailable) {
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: `${SERVER_URL}/save`,
+                    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                    data: JSON.stringify({ folder, filename, content }),
+                    timeout: 10000,
+                    onload: (res) => {
+                        try {
+                            const result = JSON.parse(res.responseText);
+                            if (!result.ok) {
+                                console.error('[弹幕下载器] 服务端写入失败，降级:', result.error);
+                                browserDownload(filename, content);
+                                finish({ ok: true, fallback: true });
+                                return;
+                            }
+                            finish(result);
+                        } catch (e) {
                             browserDownload(filename, content);
+                            finish({ ok: true, fallback: true });
                         }
-                    } catch (e) { browserDownload(filename, content); }
-                },
-                onerror:   () => { serverAvailable = false; updateServerStatus(false); browserDownload(filename, content); },
-                ontimeout: () => { browserDownload(filename, content); },
-            });
-        } else {
-            browserDownload(filename, content);
-        }
+                    },
+                    onerror: () => {
+                        serverAvailable = false;
+                        updateServerStatus(false);
+                        browserDownload(filename, content);
+                        finish({ ok: true, fallback: true });
+                    },
+                    ontimeout: () => {
+                        browserDownload(filename, content);
+                        finish({ ok: true, fallback: true });
+                    },
+                });
+            } else {
+                browserDownload(filename, content);
+                finish({ ok: true, fallback: true });
+            }
+        });
     }
 
     function browserDownload(filename, content) {
@@ -289,6 +374,79 @@
 
     function clearLogs() {
         GM_setValue(STORAGE_KEYS.LOGS, []);
+    }
+
+    function buildVideoDataFromView(viewData) {
+        return {
+            bvid: viewData.data.bvid,
+            title: viewData.data.title,
+            cover: viewData.data.pic,
+            uploader: viewData.data.owner?.name,
+            pubdate: viewData.data.pubdate,
+            desc: viewData.data.desc,
+            pages: viewData.data.pages || [],
+        };
+    }
+
+    async function fetchDanmakuPartsForVideoData(videoData) {
+        const results = await pooledPromiseAll(
+            (videoData.pages || []).map(page => async () => {
+                const fileName = buildPartXmlFileName(videoData, page);
+                const url = `https://comment.bilibili.com/${page.cid}.xml`;
+                try {
+                    const content = await fetchXmlContent(url);
+                    const matches = content.match(/<d p=".*?">.*?<\/d>/g);
+                    return {
+                        ok: true,
+                        page: page.page,
+                        cid: page.cid,
+                        partTitle: page.part || `P${page.page}`,
+                        fileName,
+                        content,
+                        danmakuCount: matches ? matches.length : 0,
+                    };
+                } catch (err) {
+                    return {
+                        ok: false,
+                        page: page.page,
+                        cid: page.cid,
+                        partTitle: page.part || `P${page.page}`,
+                        fileName,
+                        error: err.message,
+                    };
+                }
+            }),
+            MAX_PARALLEL_REQUESTS
+        );
+
+        return results;
+    }
+
+    function buildMergedXml(parts) {
+        const allDanmaku = [];
+        parts.forEach(part => {
+            if (!part?.content) return;
+            const matches = part.content.match(/<d p=".*?">.*?<\/d>/g);
+            if (matches) allDanmaku.push(...matches);
+        });
+
+        return {
+            danmakuCount: allDanmaku.length,
+            content: `<?xml version="1.0" encoding="UTF-8"?>
+<i>
+    <chatserver>chat.bilibili.com</chatserver>
+    <chatid>${parts[0]?.cid || 0}</chatid>
+    <mission>0</mission>
+    <source>k-v</source>
+    ${allDanmaku.join('\n    ')}
+</i>`,
+        };
+    }
+
+    function queueVideoDownloads(videoData) {
+        const tasks = buildVideoTasks(videoData);
+        tasks.forEach(task => downloadVideo(task.filename, task.metadata));
+        return tasks;
     }
 
     // ========== 收藏夹 API ==========
@@ -947,22 +1105,12 @@
             const data = await fetchJson(`https://api.bilibili.com/x/web-interface/view?bvid=${bvId}`);
             if (data.code !== 0) throw new Error(data.message);
 
-            const mainTitle = sanitizeFilename(data.data.title);
-            const pages = data.data.pages;
+            const videoData = buildVideoDataFromView(data);
+            const pages = videoData.pages;
 
-            videoInfo = { 
-                title: mainTitle, 
-                bvId, 
-                pages,
-                metadata: {
-                    bvid: bvId,
-                    title: data.data.title,
-                    cover: data.data.pic,
-                    uploader: data.data.owner?.name,
-                    pubdate: data.data.pubdate,
-                    desc: data.data.desc,
-                    updateTime: Date.now()
-                }
+            videoInfo = {
+                bvId,
+                ...videoData,
             };
 
             videoTitleEl.textContent = data.data.title;
@@ -977,7 +1125,8 @@
 
     async function downloadSplit() {
         if (!videoInfo) return;
-        const { title, bvId, pages } = videoInfo;
+        const { bvid, pages } = videoInfo;
+        const groupDir = buildGroupDir(videoInfo.title, bvid);
         setVideoButtonsDisabled(true);
         setStatus('');
         setProgress(0, `0 / ${pages.length}`);
@@ -986,12 +1135,9 @@
 
         for (let i = 0; i < pages.length; i++) {
             const page = pages[i];
-            const partName = sanitizeFilename(page.part);
-            const fileName = `${title}_P${page.page}_${partName}_${bvId}.xml`;
-            const url = `https://comment.bilibili.com/${page.cid}.xml`;
             try {
-                const content = await fetchXmlContent(url);
-                downloadFile(fileName, content);
+                const content = await fetchXmlContent(`https://comment.bilibili.com/${page.cid}.xml`);
+                await downloadFile(buildPartXmlFileName(videoInfo, page), content, getDanmakuFolder(groupDir));
                 succCount++;
             } catch (err) {
                 failCount++;
@@ -1008,61 +1154,41 @@
         } else {
             setStatus(`完成：${succCount} 成功, ${failCount} 失败`, 'error');
         }
-        
-        // 后台触发全局视频下载
-        downloadVideo(`${title}_${bvId}.mp4`, videoInfo.metadata);
+
+        queueVideoDownloads(videoInfo);
     }
 
     async function downloadMerge() {
         if (!videoInfo) return;
-        const { title, bvId, pages } = videoInfo;
+        const { title, bvid, pages } = videoInfo;
+        const groupDir = buildGroupDir(title, bvid);
         setVideoButtonsDisabled(true);
         setStatus('');
         setProgress(0, `正在下载并合并 ${pages.length} P ...`);
 
-        const tasks = pages.map((page, idx) => {
-            const url = `https://comment.bilibili.com/${page.cid}.xml`;
-            return fetchXmlContent(url)
-                .then(content => {
-                    setProgress(((idx + 1) / pages.length) * 80, `下载中 ${idx + 1}/${pages.length}`);
-                    return { cid: page.cid, content };
-                })
-                .catch(err => {
-                    console.error(`[弹幕下载器] P${page.page} 下载失败:`, err.message);
-                    return null;
-                });
-        });
-
-        const results = await Promise.all(tasks);
-        setProgress(85, '合并中...');
-
-        let allDanmaku = [];
-        results.forEach(res => {
-            if (res && res.content) {
-                const matches = res.content.match(/<d p=".*?">.*?<\/d>/g);
-                if (matches) allDanmaku.push(...matches);
+        const partResults = [];
+        for (let i = 0; i < pages.length; i++) {
+            const page = pages[i];
+            try {
+                const content = await fetchXmlContent(`https://comment.bilibili.com/${page.cid}.xml`);
+                await downloadFile(buildPartXmlFileName(videoInfo, page), content, getDanmakuFolder(groupDir));
+                partResults.push({ cid: page.cid, content });
+            } catch (err) {
+                console.error(`[弹幕下载器] P${page.page} 下载失败:`, err.message);
             }
-        });
+            setProgress(((i + 1) / pages.length) * 80, `下载中 ${i + 1}/${pages.length}`);
+        }
 
-        const mergedXml = `<?xml version="1.0" encoding="UTF-8"?>
-<i>
-    <chatserver>chat.bilibili.com</chatserver>
-    <chatid>${pages[0].cid}</chatid>
-    <mission>0</mission>
-    <source>k-v</source>
-    ${allDanmaku.join('\n    ')}
-</i>`;
-
-        const fileName = `${title}_[全集合并]_${bvId}.xml`;
+        setProgress(88, '合并中...');
+        const mergedResult = buildMergedXml(partResults);
         setProgress(95, '保存文件...');
-        downloadFile(fileName, mergedXml);
+        await downloadFile(buildMergedXmlFileName(title, bvid), mergedResult.content, getDanmakuFolder(groupDir));
 
         resetProgress();
         setVideoButtonsDisabled(false);
-        setStatus(`✅ 合并完成！共 ${allDanmaku.length} 条弹幕`, 'success');
+        setStatus(`✅ 合并完成！共 ${mergedResult.danmakuCount} 条弹幕`, 'success');
 
-        // 后台触发全局视频下载
-        downloadVideo(`${title}_${bvId}.mp4`, videoInfo.metadata);
+        queueVideoDownloads(videoInfo);
     }
 
     btnSplit.addEventListener('click', downloadSplit);
@@ -1104,53 +1230,10 @@
         updateDiag();
     }
 
-    /**
-     * 为单个视频获取合并弹幕（轮询用）
-     */
-    async function fetchMergedDanmakuForVideo(bvId) {
+    async function fetchVideoDataByBvId(bvId) {
         const viewData = await fetchJson(`https://api.bilibili.com/x/web-interface/view?bvid=${bvId}`);
         if (viewData.code !== 0) throw new Error(viewData.message);
-
-        const title = sanitizeFilename(viewData.data.title);
-        const pages = viewData.data.pages;
-
-        // 限并发下载所有分P弹幕，避免瞬间发出过多请求
-        const results = await pooledPromiseAll(
-            pages.map(page => () => {
-                const url = `https://comment.bilibili.com/${page.cid}.xml`;
-                return fetchXmlContent(url).then(content => ({ cid: page.cid, content })).catch(() => null);
-            }),
-            MAX_PARALLEL_REQUESTS
-        );
-
-        let allDanmaku = [];
-        results.forEach(res => {
-            if (res && res.content) {
-                const matches = res.content.match(/<d p=".*?">.*?<\/d>/g);
-                if (matches) allDanmaku.push(...matches);
-            }
-        });
-
-        const mergedXml = `<?xml version="1.0" encoding="UTF-8"?>
-<i>
-    <chatserver>chat.bilibili.com</chatserver>
-    <chatid>${pages[0].cid}</chatid>
-    <mission>0</mission>
-    <source>k-v</source>
-    ${allDanmaku.join('\n    ')}
-</i>`;
-
-        const metadata = {
-            bvid: bvId,
-            title: viewData.data.title,
-            cover: viewData.data.pic,
-            uploader: viewData.data.owner?.name,
-            pubdate: viewData.data.pubdate,
-            desc: viewData.data.desc,
-            updateTime: Date.now()
-        };
-        const fileName = `${title}_[全集合并]_${bvId}.xml`;
-        return { fileName, mergedXml, title: viewData.data.title, danmakuCount: allDanmaku.length, pages: pages.length, metadata };
+        return buildVideoDataFromView(viewData);
     }
 
     /**
@@ -1176,15 +1259,14 @@
         isPolling = true;
         updatePollStatusUI();
 
-        // 本次轮询的子文件夹名（精确到分钟）
-        const pollFolder = formatPollTimestamp(new Date());
+        const pollTimestamp = formatPollTimestamp(new Date());
         // 收集本次会话每条记录，用于生成日志文件
         const sessionLines = [];
         let totalSuccess = 0, totalFail = 0;
 
         try {
             addLog({ type: 'info', message: `开始轮询收藏夹 (ID: ${favId})` });
-            sessionLines.push(`轮询时间: ${pollFolder.replace('_', ' ').replace(/-/g, ':')}`);
+            sessionLines.push(`轮询时间: ${pollTimestamp.replace('_', ' ').replace(/-/g, ':')}`);
             sessionLines.push(`收藏夹 ID: ${favId}`);
             sessionLines.push('');
 
@@ -1198,19 +1280,38 @@
                 pollStatusEl.textContent = `⏳ 下载中 (${i + 1}/${videos.length}): ${video.title}`;
 
                 try {
-                    const result = await fetchMergedDanmakuForVideo(video.bvid);
-                    downloadFile(result.fileName, result.mergedXml, pollFolder);
-                    downloadVideo(`${sanitizeFilename(result.title)}_${video.bvid}.mp4`, result.metadata);
+                    const videoData = await fetchVideoDataByBvId(video.bvid);
+                    const groupDir = buildGroupDir(videoData.title, videoData.bvid);
+                    const danmakuFolder = getDanmakuFolder(groupDir);
+                    const parts = await fetchDanmakuPartsForVideoData(videoData);
+                    const successfulParts = parts.filter(part => part.ok);
+
+                    sessionLines.push(`✅ ${videoData.title}`);
+                    sessionLines.push(`   BV: ${videoData.bvid}`);
+                    sessionLines.push(`   目录: ${danmakuFolder}`);
+
+                    for (const part of parts) {
+                        if (part.ok) {
+                            const saveResult = await downloadFile(part.fileName, part.content, danmakuFolder);
+                            sessionLines.push(`   [成功] ${part.fileName} · 更新时间 ${formatTime(saveResult.time)}`);
+                        } else {
+                            sessionLines.push(`   [失败] ${part.fileName} · ${part.error}`);
+                        }
+                    }
+
+                    queueVideoDownloads(videoData);
 
                     addLog({
-                        type: 'success',
+                        type: successfulParts.length === parts.length ? 'success' : 'error',
                         bvid: video.bvid,
                         title: video.title,
-                        message: `下载成功 · ${result.pages}P · ${result.danmakuCount} 条弹幕`,
+                        message: `弹幕更新完成 · ${successfulParts.length}/${parts.length} P`,
                     });
-                    sessionLines.push(`✅ ${result.title}`);
-                    sessionLines.push(`   ${video.bvid}  ${result.pages}P · ${result.danmakuCount} 条弹幕`);
-                    totalSuccess++;
+                    if (successfulParts.length === parts.length) {
+                        totalSuccess++;
+                    } else {
+                        totalFail++;
+                    }
                 } catch (err) {
                     addLog({
                         type: 'error',
@@ -1222,6 +1323,8 @@
                     sessionLines.push(`   ${video.bvid}  失败: ${err.message}`);
                     totalFail++;
                 }
+
+                sessionLines.push('');
 
                 // 间隔避免频率限制
                 await sleep(1000);
@@ -1236,7 +1339,7 @@
             sessionLines.push('─'.repeat(50));
             sessionLines.push(`合计: ${totalSuccess} 成功, ${totalFail} 失败`);
             const logContent = sessionLines.join('\n');
-            downloadFile(`轮询日志_${pollFolder}.txt`, logContent);
+            await downloadFile(`轮询日志_${pollTimestamp}.txt`, logContent, getDanmakuLogFolder());
 
             // 发送桌面通知
             try {

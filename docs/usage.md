@@ -60,6 +60,8 @@ node src/get-danmaku-v2.js BV1xx411c7mD --merge
 
 - 自定义保存目录
 - 弹幕、视频、元数据统一归档
+- 多 P 视频按分 P 全量下载
+- 轮询弹幕写入固定目录并同名覆盖
 - 支持本地视频下载
 - 支持 WebUI
 - 支持同名覆盖
@@ -99,9 +101,9 @@ node danmaku-server.mjs
 
 ### 第三步：使用方式
 
-- 手动下载当前视频弹幕
-- 合并多 P 弹幕
-- 自动触发对应视频下载
+- 手动下载当前视频的分 P 弹幕
+- 手动合并多 P 弹幕，同时仍会触发全部分 P 视频下载
+- 自动触发对应视频的全部分 P 下载
 - 配置收藏夹 ID 并开启轮询
 
 ### WebUI
@@ -114,9 +116,9 @@ http://127.0.0.1:18888/webui
 
 当前 WebUI 支持：
 
-- 查看本地视频卡片列表
-- 显示封面、标题、UP 主、下载时间
-- 播放本地视频
+- 按 BV 查看本地视频卡片列表
+- 显示封面、标题、UP 主、下载时间与总 P 数
+- 通过“查看分P”详情弹层浏览并播放指定分 P
 - 打开视频所属文件夹
 
 ## PM2 开机自启
@@ -153,14 +155,27 @@ Downloads/
 
 ```text
 BASE_DIR/
-├── 2026-03-14_21-15/
-│   ├── 视频标题A_[全集合并]_BV1xxx.xml
-│   ├── 视频标题B_[全集合并]_BV1yyy.xml
-│   └── 轮询日志_2026-03-14_21-15.txt
+├── danmaku/
+│   ├── 视频标题_BV1xxx/
+│   │   ├── 视频标题_P1_片头_BV1xxx.xml
+│   │   ├── 视频标题_P2_正片_BV1xxx.xml
+│   │   └── 视频标题_[全集合并]_BV1xxx.xml
+│   └── logs/
+│       ├── 轮询日志_2026-03-26_09-00.txt
+│       └── 轮询日志_2026-03-26_15-00.txt
 └── videos/
-    ├── 视频标题_BV1xxx.mp4
-    └── 视频标题_BV1xxx.info.json
+    └── 视频标题_BV1xxx/
+        ├── 视频标题_P1_片头_BV1xxx.mp4
+        ├── 视频标题_P1_片头_BV1xxx.info.json
+        ├── 视频标题_P2_正片_BV1xxx.mp4
+        └── 视频标题_P2_正片_BV1xxx.info.json
 ```
+
+说明：
+
+- 收藏夹轮询默认更新 `danmaku/<视频标题_BVID>/` 下的分 P XML
+- 后续轮询会直接覆盖同名 XML，不再新增时间戳弹幕目录
+- `danmaku/logs/` 下保留每次轮询的历史日志文件
 
 ## 常见操作
 
@@ -189,5 +204,7 @@ node --test test/video-format-selector.test.mjs
 如果修改了服务端，建议至少补做：
 
 - `node --check danmaku-server.mjs`
+- `node --check src/get-danmaku-v4.user.js`
+- `node --check webui/app.js`
 - 手动打开一次 `/webui`
 - 实测一次视频下载

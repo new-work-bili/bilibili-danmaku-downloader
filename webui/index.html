@@ -68,6 +68,21 @@
         </div>
     </div>
 
+    <!-- Detail Modal -->
+    <div id="detail-modal" class="modal hidden">
+        <div class="modal-backdrop" onclick="closeDetails()"></div>
+        <div class="modal-content detail-modal-content">
+            <div class="modal-header">
+                <div class="detail-modal-header-text">
+                    <h3 id="detail-title">分P详情</h3>
+                    <p id="detail-subtitle">-</p>
+                </div>
+                <button class="btn-icon" onclick="closeDetails()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <div id="detail-body" class="detail-modal-body"></div>
+        </div>
+    </div>
+
     <script src="app.js"></script>
 </body>
 </html>

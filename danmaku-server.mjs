@@ -23,6 +23,7 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.DANMAKU_PORT) || 18888;
 const BASE_DIR = process.env.DANMAKU_DIR
     || 'F:\\下载\\Chrome\\弹幕';   // ← 在此修改你的默认保存目录
+const BASE_DIR_RESOLVED = path.resolve(BASE_DIR);
 const YT_DLP_BIN = process.env.YT_DLP_BIN || 'yt-dlp';
 const YT_DLP_SCRIPT = process.env.YT_DLP_SCRIPT || '';
 const DEVTOOLS_BROWSER_PATHS = [
@@ -64,24 +65,48 @@ function writeJsonFile(filePath, data) {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
-function findExistingVideoByBvid(targetDir, bvid) {
-    if (!fs.existsSync(targetDir)) return null;
+function ensureInsideBase(targetPath) {
+    const resolved = path.resolve(targetPath);
+    if (resolved !== BASE_DIR_RESOLVED && !resolved.startsWith(`${BASE_DIR_RESOLVED}${path.sep}`)) {
+        throw new Error('权限不足，只能访问下载目录内的路径');
+    }
+    return resolved;
+}
 
-    const existingFiles = fs.readdirSync(targetDir);
-    const match = existingFiles.find(fileName => {
-        if (!fileName.includes(`_${bvid}.`) || !isDownloadedVideoFile(fileName)) {
-            return false;
-        }
+function resolveWithinBase(relativePath = '.') {
+    if (path.isAbsolute(relativePath)) {
+        throw new Error('仅允许相对路径');
+    }
+    return ensureInsideBase(path.resolve(BASE_DIR_RESOLVED, path.normalize(relativePath)));
+}
 
-        const fullPath = path.join(targetDir, fileName);
-        try {
-            return fs.statSync(fullPath).size > 0;
-        } catch (_) {
-            return false;
-        }
-    });
+function toSafePathSegment(value, fallback = 'untitled') {
+    const sanitized = path.basename(String(value || fallback)).replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
+    return sanitized || fallback;
+}
 
-    return match ? path.join(targetDir, match) : null;
+function toTaskToken(value) {
+    return String(value || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function getVideoTaskKey(metadata = {}) {
+    const bvid = String(metadata.bvid || '').trim();
+    const page = Number(metadata.page) || 1;
+    return `${bvid}:p${page}`;
+}
+
+function getVideoGroupDir(metadata = {}) {
+    return toSafePathSegment(metadata.groupDir || metadata.bvid || 'unknown-video');
+}
+
+function buildFilesUrlPrefix(dirPath) {
+    const relative = path.relative(BASE_DIR_RESOLVED, dirPath);
+    const encoded = relative
+        .split(path.sep)
+        .filter(Boolean)
+        .map(segment => encodeURIComponent(segment))
+        .join('/');
+    return encoded ? `/files/${encoded}/` : '/files/';
 }
 
 function formatBytes(bytes) {
@@ -394,6 +419,119 @@ function findDownloadedVideoByBaseName(targetDir, baseName) {
     return match ? path.join(targetDir, match) : null;
 }
 
+function listGroupedVideoCards() {
+    const cards = new Map();
+    const videosRoot = resolveWithinBase('videos');
+
+    function scorePart(part) {
+        return [
+            part.videoFile ? 1 : 0,
+            part.danmakuFile ? 1 : 0,
+            part.downloadStatus === 'completed' ? 1 : 0,
+            Number(part.updateTime) || 0,
+        ];
+    }
+
+    function isBetterPart(candidate, existing) {
+        if (!existing) return true;
+        const left = scorePart(candidate);
+        const right = scorePart(existing);
+        for (let i = 0; i < left.length; i += 1) {
+            if (left[i] > right[i]) return true;
+            if (left[i] < right[i]) return false;
+        }
+        return String(candidate.filename || '').length > String(existing.filename || '').length;
+    }
+
+    function scanDir(dir) {
+        if (!fs.existsSync(dir)) return;
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+            const fullPath = path.join(dir, file);
+            const stat = fs.statSync(fullPath);
+            if (stat.isDirectory()) {
+                scanDir(fullPath);
+                continue;
+            }
+            if (!file.endsWith('.info.json')) continue;
+
+            const info = readJsonFile(fullPath);
+            if (!info?.bvid) continue;
+
+            const baseName = file.slice(0, -'.info.json'.length);
+            const partDir = path.dirname(fullPath);
+            const groupDir = getVideoGroupDir(info);
+            const cardKey = info.bvid || groupDir;
+            const videoPath = findDownloadedVideoByBaseName(partDir, baseName);
+            const videoFile = videoPath ? path.basename(videoPath) : null;
+            let danmakuFile = null;
+            try {
+                const danmakuDir = resolveWithinBase(path.join('danmaku', groupDir));
+                const danmakuPath = path.join(danmakuDir, `${baseName}.xml`);
+                if (fs.existsSync(danmakuPath)) {
+                    danmakuFile = path.basename(danmakuPath);
+                }
+            } catch (_) {
+                danmakuFile = null;
+            }
+
+            const partUpdateTime = info.updateTime
+                || info.downloadFinishedAt
+                || info.lastResolvedAt
+                || stat.mtimeMs;
+            const part = {
+                page: Number(info.page) || 1,
+                partTitle: info.partTitle || `P${Number(info.page) || 1}`,
+                videoFile,
+                danmakuFile,
+                downloadStatus: info.downloadStatus || 'unknown',
+                fileUrlPrefix: buildFilesUrlPrefix(partDir),
+                updateTime: partUpdateTime,
+                folderPath: partDir,
+                filename: baseName,
+            };
+
+            if (!cards.has(cardKey)) {
+                cards.set(cardKey, {
+                    bvid: info.bvid,
+                    title: info.title || groupDir,
+                    cover: info.cover || '',
+                    uploader: info.uploader || '',
+                    folderPath: partDir,
+                    groupDir,
+                    partCount: Number(info.partCount) || 0,
+                    hasMultipleParts: Boolean(info.hasMultipleParts),
+                    updateTime: partUpdateTime,
+                    parts: [],
+                    partMap: new Map(),
+                });
+            }
+
+            const card = cards.get(cardKey);
+            card.folderPath = partDir;
+            card.partCount = Math.max(card.partCount, Number(info.partCount) || 0, card.parts.length + 1);
+            card.hasMultipleParts = card.hasMultipleParts || Boolean(info.hasMultipleParts);
+            card.updateTime = Math.max(card.updateTime || 0, partUpdateTime || 0);
+            const existingPart = card.partMap.get(part.page);
+            if (isBetterPart(part, existingPart)) {
+                card.partMap.set(part.page, part);
+            }
+        }
+    }
+
+    scanDir(videosRoot);
+
+    return [...cards.values()]
+        .map(card => {
+            card.parts = [...card.partMap.values()].sort((a, b) => a.page - b.page);
+            delete card.partMap;
+            card.partCount = Math.max(card.partCount, card.parts.length);
+            card.hasMultipleParts = card.hasMultipleParts || card.partCount > 1;
+            return card;
+        })
+        .sort((a, b) => (b.updateTime || 0) - (a.updateTime || 0));
+}
+
 function getSelectedDynamicRangeRank(dynamicRange) {
     const value = String(dynamicRange || '').toUpperCase();
     if (value.includes('DOLBY')) return 3;
@@ -465,12 +603,10 @@ const server = http.createServer((req, res) => {
 
                 if (!filename) throw new Error('filename 不能为空');
 
-                // 路径安全检查：禁止路径穿越
-                const safeFolder = folder.replace(/\.\./g, '_');
                 const safeFilename = path.basename(filename); // 只取文件名部分
-                const targetDir = safeFolder
-                    ? path.join(BASE_DIR, safeFolder)
-                    : BASE_DIR;
+                const targetDir = folder
+                    ? resolveWithinBase(folder)
+                    : BASE_DIR_RESOLVED;
 
                 fs.mkdirSync(targetDir, { recursive: true });
 
@@ -494,20 +630,28 @@ const server = http.createServer((req, res) => {
         req.on('data', chunk => (body += chunk));
         req.on('end', async () => {
             let cookieFile = null;
-            let currentBvid = null;
+            let currentTaskKey = null;
             try {
                 const { filename, metadata, cookieStr, cookies } = JSON.parse(body);
                 const bvid = metadata?.bvid;
-                currentBvid = bvid;
-                if (!filename || !bvid) throw new Error('filename 或 bvid 不能为空');
+                const page = Number(metadata?.page) || 0;
+                const partTitle = String(metadata?.partTitle || '').trim();
+                if (!filename || !bvid || page <= 0 || !partTitle) {
+                    throw new Error('filename、metadata.bvid、metadata.page、metadata.partTitle 不能为空');
+                }
+
+                const taskKey = getVideoTaskKey(metadata);
+                const taskToken = toTaskToken(taskKey);
+                currentTaskKey = taskKey;
+                const groupDir = getVideoGroupDir(metadata);
 
                 const safeFilename = path.basename(filename);
-                const targetDir = path.join(BASE_DIR, 'videos');
+                const targetDir = resolveWithinBase(path.join('videos', groupDir));
                 const requestedVideoPath = path.join(targetDir, safeFilename);
 
                 fs.mkdirSync(targetDir, { recursive: true });
 
-                const existingPath = findExistingVideoByBvid(targetDir, bvid);
+                const existingPath = findDownloadedVideoByBaseName(targetDir, path.parse(safeFilename).name);
                 const existingInfo = existingPath ? readJsonFile(getInfoPathForVideo(existingPath)) : null;
                 if (existingPath) {
                     const infoPath = getInfoPathForVideo(existingPath);
@@ -522,8 +666,8 @@ const server = http.createServer((req, res) => {
                     }
                 }
 
-                if (activeVideoDownloads.has(bvid)) {
-                    const activePath = activeVideoDownloads.get(bvid);
+                if (activeVideoDownloads.has(taskKey)) {
+                    const activePath = activeVideoDownloads.get(taskKey);
                     console.log(`[视频正在下载中，跳过重复任务] ${activePath}`);
                     json(res, 200, { ok: true, path: activePath, inProgress: true });
                     return;
@@ -531,7 +675,7 @@ const server = http.createServer((req, res) => {
 
                 let videoPath = existingPath || requestedVideoPath;
                 let infoPath = getInfoPathForVideo(videoPath);
-                const videoUrl = `https://www.bilibili.com/video/${bvid}`;
+                const videoUrl = `https://www.bilibili.com/video/${bvid}?p=${page}`;
                 const requestCookies = Array.isArray(cookies) ? cookies.filter(cookie => cookie?.name) : [];
                 const cookieCandidates = [];
                 const seenSources = new Set();
@@ -566,7 +710,7 @@ const server = http.createServer((req, res) => {
                 let lastProbeError = null;
                 for (let i = 0; i < cookieCandidates.length; i += 1) {
                     const candidate = cookieCandidates[i];
-                    const probeCookieFile = buildCookieFile(targetDir, `${bvid}_probe_${i}`, candidate.cookies, candidate.cookieStr);
+                    const probeCookieFile = buildCookieFile(targetDir, `${taskToken}_probe_${i}`, candidate.cookies, candidate.cookieStr);
 
                     try {
                         const probeInfo = await runYtDlpJsonWithRetry(videoUrl, probeCookieFile);
@@ -608,15 +752,15 @@ const server = http.createServer((req, res) => {
                 const downloadPlan = bestCandidate.downloadPlan;
                 const selectedFormat = bestCandidate.selectedFormat;
                 if ((bestCandidate.cookies.length > 0) || bestCandidate.cookieStr) {
-                    cookieFile = buildCookieFile(targetDir, bvid, bestCandidate.cookies, bestCandidate.cookieStr);
+                    cookieFile = buildCookieFile(targetDir, taskToken, bestCandidate.cookies, bestCandidate.cookieStr);
                     console.log(`[yt-dlp] 采用 Cookie 来源: ${bestCandidate.source}`);
                 } else {
                     console.log('[yt-dlp] 将以游客身份下载');
                 }
 
-                activeVideoDownloads.set(bvid, videoPath);
+                activeVideoDownloads.set(taskKey, videoPath);
                 if (existingPath && compareSelectedFormatQuality(existingInfo?.selectedFormat, selectedFormat) >= 0) {
-                    activeVideoDownloads.delete(bvid);
+                    activeVideoDownloads.delete(taskKey);
                     cleanupFile(cookieFile);
                     writeJsonFile(infoPath, buildVideoMetadata(existingInfo, metadata, existingInfo?.selectedFormat || selectedFormat, existingPath, {
                         downloadStatus: 'completed',
@@ -638,7 +782,7 @@ const server = http.createServer((req, res) => {
                     console.log(`[检测到已有视频可能画质不足，准备覆盖下载] ${existingPath}`);
                     videoPath = existingPath;
                     infoPath = getInfoPathForVideo(existingPath);
-                    activeVideoDownloads.set(bvid, videoPath);
+                    activeVideoDownloads.set(taskKey, videoPath);
                 }
 
                 writeJsonFile(infoPath, buildVideoMetadata(existingInfo, metadata, selectedFormat, videoPath, {
@@ -676,7 +820,7 @@ const server = http.createServer((req, res) => {
                 child.stderr.on('data', d => { stderrBuf += d.toString(); });
                 child.stdout.on('data', d => { process.stdout.write(`[yt-dlp stdout] ${d}`); });
                 child.on('error', (err) => {
-                    activeVideoDownloads.delete(bvid);
+                    activeVideoDownloads.delete(taskKey);
                     cleanupFile(cookieFile);
                     writeJsonFile(infoPath, buildVideoMetadata(readJsonFile(infoPath), metadata, selectedFormat, videoPath, {
                         sourceDuration: probeInfo.duration ?? null,
@@ -688,7 +832,7 @@ const server = http.createServer((req, res) => {
                 });
 
                 child.on('close', (code) => {
-                    activeVideoDownloads.delete(bvid);
+                    activeVideoDownloads.delete(taskKey);
                     cleanupFile(cookieFile);
 
                     if (code !== 0) {
@@ -716,8 +860,8 @@ const server = http.createServer((req, res) => {
                 });
 
             } catch (err) {
-                if (currentBvid) {
-                    activeVideoDownloads.delete(currentBvid);
+                if (currentTaskKey) {
+                    activeVideoDownloads.delete(currentTaskKey);
                 }
                 cleanupFile(cookieFile);
                 console.error(`[❌ 下载视频请求错误]`, err.message);
@@ -730,40 +874,7 @@ const server = http.createServer((req, res) => {
     // ── 获取已下载的视频列表 (供WebUI使用) ───────────────
     if (req.method === 'GET' && req.url === '/api/videos') {
         try {
-            const list = [];
-            function scanDir(dir) {
-                if (!fs.existsSync(dir)) return;
-                const files = fs.readdirSync(dir);
-                for (const file of files) {
-                    const fullPath = path.join(dir, file);
-                    const stat = fs.statSync(fullPath);
-                    if (stat.isDirectory()) {
-                        scanDir(fullPath);
-                    } else if (file.endsWith('.info.json')) {
-                        try {
-                            const info = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
-                            const baseName = file.replace('.info.json', '');
-                            const videoFile = fs.existsSync(path.join(dir, baseName + '.mp4')) ? baseName + '.mp4' : null;
-                            const danmakuFile = fs.existsSync(path.join(dir, baseName + '.xml')) ? baseName + '.xml' : null;
-                            const folderRelative = path.relative(BASE_DIR, dir).replace(/\\/g, '/');
-                            
-                            list.push({
-                                ...info,
-                                folderPath: dir,
-                                fileUrlPrefix: folderRelative ? `/files/${encodeURIComponent(folderRelative)}/` : `/files/`,
-                                videoFile,
-                                danmakuFile,
-                                filename: baseName,
-                                createdAt: stat.mtimeMs
-                            });
-                        } catch (e) {}
-                    }
-                }
-            }
-            scanDir(path.join(BASE_DIR, 'videos'));
-            
-            list.sort((a, b) => (b.updateTime || b.createdAt) - (a.updateTime || a.createdAt));
-            json(res, 200, { ok: true, data: list });
+            json(res, 200, { ok: true, data: listGroupedVideoCards() });
         } catch (err) {
             json(res, 500, { ok: false, error: err.message });
         }
@@ -778,11 +889,7 @@ const server = http.createServer((req, res) => {
             try {
                 const { folder } = JSON.parse(body);
                 if (!folder) throw new Error('folder 不能为空');
-                
-                const safeFolder = path.normalize(folder);
-                if (!safeFolder.startsWith(path.normalize(BASE_DIR))) {
-                    throw new Error('权限不足，只能打开下载目录内的文件夹');
-                }
+                const safeFolder = ensureInsideBase(folder);
                 
                 const command = process.platform === 'win32'
                     ? `explorer "${safeFolder}"`
@@ -805,9 +912,9 @@ const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url.startsWith('/files/')) {
         try {
             const fileUri = decodeURIComponent(req.url.replace('/files/', ''));
-            const filePath = path.normalize(path.join(BASE_DIR, fileUri));
+            const filePath = resolveWithinBase(fileUri);
             
-            if (!filePath.startsWith(path.normalize(BASE_DIR)) || !fs.existsSync(filePath)) {
+            if (!fs.existsSync(filePath)) {
                 res.writeHead(404);
                 res.end('Not Found');
                 return;

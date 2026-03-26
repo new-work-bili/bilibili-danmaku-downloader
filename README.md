@@ -10,9 +10,9 @@
 ## 当前能力
 
 - 下载单个视频或多 P 视频的弹幕
-- 收藏夹轮询下载弹幕
-- 下载对应视频到本地并记录元数据
-- WebUI 展示封面、标题、UP 主、下载状态，并支持本地播放
+- 收藏夹轮询将弹幕更新到固定目录并同名覆盖
+- 多 P 视频按分 P 全量下载到本地并记录元数据
+- WebUI 按 BV 聚合展示视频卡片，并可展开播放各分 P
 - 智能格式选择
   - 同档优先高帧率
   - 能保住 4K 就不降到 1080P
@@ -25,7 +25,7 @@
 | v1 基础版 | `src/get-danmaku.js` | 命令行，适用于单 P 视频 |
 | v2 进阶版 | `src/get-danmaku-v2.js` | 命令行，支持多 P 与合并下载 |
 | v3 油猴版 | `src/get-danmaku-v3.user.js` | 浏览器脚本，下载到浏览器默认下载目录 |
-| v4 本地服务版 | `src/get-danmaku-v4.user.js` + `danmaku-server.mjs` | 推荐方案，支持本地目录、视频下载、WebUI、同名覆盖 |
+| v4 本地服务版 | `src/get-danmaku-v4.user.js` + `danmaku-server.mjs` | 推荐方案，支持固定目录覆盖、分 P 视频下载、WebUI、同名覆盖 |
 
 ## 快速开始
 
@@ -56,6 +56,7 @@ node danmaku-server.mjs
 - 架构与关键设计：[`docs/architecture.md`](docs/architecture.md)
 - 使用说明与部署：[`docs/usage.md`](docs/usage.md)
 - WebUI、接口与安全说明：[`docs/service-webui-security.md`](docs/service-webui-security.md)
+- 需求迭代记录：[`docs/iteration-log.md`](docs/iteration-log.md)
 - 待办与后续需求：[`TODO.md`](TODO.md)
 - AI 协作入口：[`AGENTS.md`](AGENTS.md)
 
