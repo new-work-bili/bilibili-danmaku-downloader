@@ -12,6 +12,12 @@
   - 按 `BV + page` 粒度后台调用 `yt-dlp` 下载视频并记录元数据
 - `GET /api/videos`
   - 返回按 BV 聚合后的本地视频库列表
+- `GET /api/download-blacklist`
+  - 返回当前已进入黑名单的失效视频列表
+- `POST /api/download-blacklist/report`
+  - 记录一次失效 / 不可访问命中并累计次数
+- `POST /api/download-blacklist/remove`
+  - 手动移除某个 BV 的黑名单状态
 - `POST /api/open-folder`
   - 打开本机文件夹，并可选中对应视频或弹幕文件
 - `GET /files/*`
@@ -34,6 +40,9 @@ http://127.0.0.1:18888/webui
 - 显示添加收藏时间、更新弹幕时间、视频发布时间
 - 按收藏时间 / 弹幕更新时间 / 发布时间排序
 - 按 UP 主筛选
+- 查看独立的失效视频黑名单面板
+- 显示失效原因、命中次数、最近来源、首次 / 最近发现时间与错误摘要
+- 手动将黑名单中的 BV 恢复到后续轮询队列
 - 跳转到对应视频的 B 站页面
 - 点击 UP 主跳转到空间页
 - 通过详情弹层查看分 P 列表
@@ -84,6 +93,27 @@ http://127.0.0.1:18888/webui
 - 重复下载判定按 `BV + page`
 - 同目录内画质校验也按单个分 P 进行
 - cookie 临时文件名会带上分 P 任务标识，避免同 BV 多任务互相覆盖
+- 如果该 `BV` 已进入黑名单，则会在启动 `yt-dlp` 前直接返回 `skipped + blacklisted`
+
+### 黑名单状态来源
+
+服务端当前把以下情况视为“明确不可用”：
+
+1. 收藏夹接口直接标记为失效 / 下架
+2. `view` 接口明确返回资源不存在或不可访问
+3. `yt-dlp` 明确返回 404 / unavailable 类错误
+
+状态按 `bvid` 维度保存在：
+
+- `BASE_DIR/state/download-blacklist.json`
+
+当前策略：
+
+- 每次命中累加一次
+- 默认阈值 `5`
+- 达到阈值后变为 `blacklisted`
+- WebUI 只展示 `blacklisted` 条目
+- 手动移除后计数归零，下次轮询重新开始累计
 
 ## 安全边界
 
@@ -107,6 +137,9 @@ http://127.0.0.1:18888/webui
 需要重点关注的接口：
 
 - `/api/videos`
+- `/api/download-blacklist`
+- `/api/download-blacklist/report`
+- `/api/download-blacklist/remove`
 - `/files/*`
 - `/api/open-folder`
 

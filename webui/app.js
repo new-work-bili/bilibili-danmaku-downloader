@@ -1,4 +1,5 @@
 const FILTER_ALL = '__all__';
+const BLACKLIST_EXPANDED_STORAGE_KEY = 'ddl_webui_blacklist_expanded';
 const DEFAULT_COVER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360">
   <defs>
@@ -17,14 +18,24 @@ const DEFAULT_COVER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
 
 const appState = {
     cards: [],
+    blacklistEntries: [],
+    blacklistThreshold: 5,
+    blacklistExpanded: false,
     sortBy: 'updateTime',
     uploaderFilter: FILTER_ALL,
 };
 
 document.addEventListener('DOMContentLoaded', () => {
     const refreshBtn = document.getElementById('refresh-btn');
+    const blacklistToggle = document.getElementById('blacklist-toggle');
     const sortSelect = document.getElementById('sort-select');
     const uploaderSelect = document.getElementById('uploader-select');
+
+    try {
+        appState.blacklistExpanded = localStorage.getItem(BLACKLIST_EXPANDED_STORAGE_KEY) === 'true';
+    } catch (_) {
+        appState.blacklistExpanded = false;
+    }
 
     sortSelect.addEventListener('change', (event) => {
         appState.sortBy = event.target.value || 'updateTime';
@@ -36,6 +47,7 @@ document.addEventListener('DOMContentLoaded', () => {
         renderCurrentView();
     });
 
+    blacklistToggle.addEventListener('click', toggleBlacklistPanel);
     refreshBtn.addEventListener('click', loadVideos);
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') {
@@ -141,6 +153,102 @@ function updateCountLabel(filteredCount, totalCount) {
     totalCountEl.textContent = `${filteredCount} / ${totalCount} 个视频`;
 }
 
+function formatBlacklistSource(source) {
+    if (source === 'favorites-api') return '收藏夹接口';
+    if (source === 'view-api') return '视频详情接口';
+    if (source === 'yt-dlp') return 'yt-dlp';
+    return source || '未知来源';
+}
+
+function getBlacklistThreshold(entry) {
+    return Number(entry?.threshold) || appState.blacklistThreshold || 5;
+}
+
+function persistBlacklistExpanded() {
+    try {
+        localStorage.setItem(BLACKLIST_EXPANDED_STORAGE_KEY, String(appState.blacklistExpanded));
+    } catch (_) {
+        // ignore persistence errors
+    }
+}
+
+function setBlacklistPanelExpanded(expanded) {
+    appState.blacklistExpanded = !!expanded;
+    persistBlacklistExpanded();
+    renderBlacklistPanel();
+}
+
+function toggleBlacklistPanel() {
+    setBlacklistPanelExpanded(!appState.blacklistExpanded);
+}
+
+function renderBlacklistPanel() {
+    const panel = document.getElementById('blacklist-panel');
+    const content = document.getElementById('blacklist-content');
+    const list = document.getElementById('blacklist-list');
+    const empty = document.getElementById('blacklist-empty');
+    const count = document.getElementById('blacklist-count');
+    const summary = document.getElementById('blacklist-summary');
+    const toggle = document.getElementById('blacklist-toggle');
+    const entries = Array.isArray(appState.blacklistEntries) ? appState.blacklistEntries : [];
+
+    if (entries.length === 0) {
+        panel.classList.add('hidden');
+        return;
+    }
+
+    count.textContent = `${entries.length} 个条目`;
+    panel.classList.remove('hidden');
+    list.innerHTML = '';
+    summary.textContent = `当前有 ${entries.length} 个视频已进入自动跳过列表。默认折叠，按需展开查看详情和恢复下载。`;
+    toggle.textContent = appState.blacklistExpanded ? '收起' : '展开';
+    toggle.setAttribute('aria-expanded', appState.blacklistExpanded ? 'true' : 'false');
+    panel.classList.toggle('is-expanded', appState.blacklistExpanded);
+    content.classList.toggle('hidden', !appState.blacklistExpanded);
+
+    empty.classList.add('hidden');
+    entries.forEach(entry => {
+        const item = document.createElement('article');
+        item.className = 'blacklist-item';
+        item.innerHTML = `
+            <div class="blacklist-item-main">
+                <div class="blacklist-item-header">
+                    <div>
+                        <div class="blacklist-item-title">${escapeHtml(entry.title || entry.bvid || '未知视频')}</div>
+                        <div class="blacklist-item-bvid">${escapeHtml(entry.bvid || '未知 BV')}</div>
+                    </div>
+                    <span class="blacklist-hit-chip">${escapeHtml(`${Number(entry.hitCount) || 0}/${getBlacklistThreshold(entry)}`)}</span>
+                </div>
+                <div class="blacklist-item-grid">
+                    <div class="blacklist-meta-card">
+                        <span class="blacklist-meta-label">当前原因</span>
+                        <span class="blacklist-meta-value">${escapeHtml(entry.reasonText || '资源不存在或不可访问')}</span>
+                    </div>
+                    <div class="blacklist-meta-card">
+                        <span class="blacklist-meta-label">最近来源</span>
+                        <span class="blacklist-meta-value">${escapeHtml(formatBlacklistSource(entry.lastSource))}</span>
+                    </div>
+                    <div class="blacklist-meta-card">
+                        <span class="blacklist-meta-label">首次发现</span>
+                        <span class="blacklist-meta-value">${escapeHtml(formatDate(entry.firstSeenAt))}</span>
+                    </div>
+                    <div class="blacklist-meta-card">
+                        <span class="blacklist-meta-label">最近发现</span>
+                        <span class="blacklist-meta-value">${escapeHtml(formatDate(entry.lastSeenAt))}</span>
+                    </div>
+                </div>
+                <div class="blacklist-message">${escapeHtml(entry.lastMessage || '无额外错误摘要')}</div>
+            </div>
+            <div class="blacklist-item-actions">
+                <button class="btn btn-outline btn-blacklist-restore">恢复下载</button>
+            </div>
+        `;
+
+        item.querySelector('.btn-blacklist-restore').addEventListener('click', () => restoreBlacklistEntry(entry));
+        list.appendChild(item);
+    });
+}
+
 function setEmptyState(message) {
     document.getElementById('empty-msg').textContent = message;
     document.getElementById('empty-state').classList.remove('hidden');
@@ -166,22 +274,37 @@ async function loadVideos() {
     const errorState = document.getElementById('error-state');
     const emptyState = document.getElementById('empty-state');
     const toolbar = document.getElementById('toolbar');
+    const blacklistPanel = document.getElementById('blacklist-panel');
 
     grid.classList.add('hidden');
     errorState.classList.add('hidden');
     emptyState.classList.add('hidden');
     toolbar.classList.add('hidden');
+    blacklistPanel.classList.add('hidden');
     loader.classList.remove('hidden');
 
     try {
-        const response = await fetch('/api/videos');
-        if (!response.ok) throw new Error('Network response was not ok');
-        const data = await response.json();
+        const [videoResponse, blacklistResponse] = await Promise.all([
+            fetch('/api/videos'),
+            fetch('/api/download-blacklist'),
+        ]);
+        if (!videoResponse.ok) throw new Error('视频列表加载失败');
+        if (!blacklistResponse.ok) throw new Error('黑名单加载失败');
+
+        const [videoData, blacklistData] = await Promise.all([
+            videoResponse.json(),
+            blacklistResponse.json(),
+        ]);
+        if (videoData.ok === false) throw new Error(videoData.error || '视频列表加载失败');
+        if (blacklistData.ok === false) throw new Error(blacklistData.error || '黑名单加载失败');
 
         loader.classList.add('hidden');
-        appState.cards = Array.isArray(data.data) ? data.data : [];
+        appState.cards = Array.isArray(videoData.data) ? videoData.data : [];
+        appState.blacklistEntries = Array.isArray(blacklistData.data) ? blacklistData.data : [];
+        appState.blacklistThreshold = Number(blacklistData.threshold) || 5;
 
         updateToolbarOptions(appState.cards);
+        renderBlacklistPanel();
 
         if (appState.cards.length === 0) {
             updateCountLabel(0, 0);
@@ -195,6 +318,27 @@ async function loadVideos() {
         loader.classList.add('hidden');
         errorState.classList.remove('hidden');
         document.getElementById('error-msg').textContent = '加载失败: ' + error.message;
+    }
+}
+
+async function restoreBlacklistEntry(entry) {
+    const bvid = entry?.bvid;
+    if (!bvid) return;
+
+    try {
+        const response = await fetch('/api/download-blacklist/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bvid }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+            throw new Error(data.error || '恢复失败');
+        }
+        await loadVideos();
+        alert(`已恢复 ${bvid}，下次收藏夹轮询会重新尝试下载。`);
+    } catch (error) {
+        alert('恢复下载失败: ' + error.message);
     }
 }
 

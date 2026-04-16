@@ -75,6 +75,7 @@ v3 / v4 共用一套租约锁模型，目标是保证同一时刻只有一个标
 - 保存 XML 和轮询日志
 - 按 `BV + page` 粒度调 `yt-dlp` 下载视频
 - 为每个分 P 写入 `.info.json` 元数据
+- 维护失效 / 下架视频的服务端黑名单状态
 - 聚合本地视频库并提供 WebUI / 文件访问接口
 
 关键文件：
@@ -141,6 +142,25 @@ v3 / v4 共用一套租约锁模型，目标是保证同一时刻只有一个标
 - `actualSize`
 - `qualityVerifiedAt`
 
+黑名单状态文件：
+
+- `BASE_DIR/state/download-blacklist.json`
+
+主要字段包括：
+
+- `bvid`
+- `title`
+- `status`
+- `reasonCode`
+- `reasonText`
+- `hitCount`
+- `threshold`
+- `firstSeenAt`
+- `lastSeenAt`
+- `lastSource`
+- `lastMessage`
+- `favoriteTime`
+
 ## 目录归档模型
 
 当前 `v4` 的目录归档分成两条：
@@ -150,6 +170,8 @@ v3 / v4 共用一套租约锁模型，目标是保证同一时刻只有一个标
   - 手动“合并下载”时额外保存 `[全集合并]` XML
 - `BASE_DIR/videos/<title>_<bvid>/`
   - 保存每个分 P 的视频文件与同名 `.info.json`
+- `BASE_DIR/state/download-blacklist.json`
+  - 保存失效 / 下架视频的累计命中与黑名单状态
 
 轮询日志单独放在：
 
@@ -159,7 +181,24 @@ v3 / v4 共用一套租约锁模型，目标是保证同一时刻只有一个标
 
 - 轮询时可直接覆盖旧弹幕文件
 - 多 P 视频和弹幕保持一一对应
+- 失效资源在达到阈值后可稳定跳过，避免重复无效请求
 - WebUI 可以按 BV 聚合，再按分 P 展开
+
+## 失效视频自动跳过
+
+当前 `v4` 在收藏夹轮询链路中会显式区分三类情况：
+
+1. 收藏夹接口直接标记为失效 / 下架
+2. 收藏夹仍可见，但 `view` 接口明确返回资源不存在或不可访问
+3. `yt-dlp` 明确返回 404 / unavailable 类错误
+
+这些命中都会统一上报到本地服务的黑名单状态表：
+
+- 按 `bvid` 维度累计
+- 默认阈值为 `5`
+- 达到阈值后状态切为 `blacklisted`
+- 后续轮询和服务端下载入口都会直接跳过
+- WebUI 只展示已进入 `blacklisted` 的条目
 
 ## 设计取舍
 

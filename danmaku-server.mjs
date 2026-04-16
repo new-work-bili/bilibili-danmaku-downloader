@@ -15,6 +15,17 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import {
+    DOWNLOAD_BLACKLIST_THRESHOLD,
+    createEmptyBlacklistState,
+    getBlacklistEntry,
+    isBlacklistedEntry,
+    isUnavailableYtDlpMessage,
+    listBlacklistedEntries,
+    normalizeBlacklistState,
+    recordBlacklistObservation,
+    removeBlacklistEntry,
+} from './src/download-blacklist.mjs';
 import { selectVideoDownloadPlan, summarizeSelectedFormat } from './src/video-format-selector.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -45,6 +56,9 @@ const activeVideoDownloads = new Map();
 // 确保根目录存在
 fs.mkdirSync(BASE_DIR, { recursive: true });
 
+const STATE_DIR = path.join(BASE_DIR_RESOLVED, 'state');
+const DOWNLOAD_BLACKLIST_PATH = path.join(STATE_DIR, 'download-blacklist.json');
+
 function isDownloadedVideoFile(fileName) {
     return VIDEO_EXTENSIONS.has(path.extname(fileName).toLowerCase());
 }
@@ -63,6 +77,54 @@ function readJsonFile(filePath) {
 
 function writeJsonFile(filePath, data) {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+function ensureStateDir() {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+}
+
+function readDownloadBlacklistState() {
+    ensureStateDir();
+    const raw = readJsonFile(DOWNLOAD_BLACKLIST_PATH);
+    return normalizeBlacklistState(raw || createEmptyBlacklistState());
+}
+
+function writeDownloadBlacklistState(state) {
+    ensureStateDir();
+    writeJsonFile(DOWNLOAD_BLACKLIST_PATH, normalizeBlacklistState(state));
+}
+
+function getDownloadBlacklistEntry(bvid) {
+    return getBlacklistEntry(readDownloadBlacklistState(), bvid);
+}
+
+function listDownloadBlacklistStateEntries() {
+    return listBlacklistedEntries(readDownloadBlacklistState());
+}
+
+function recordDownloadBlacklistObservation(payload = {}) {
+    const { state, entry } = recordBlacklistObservation(readDownloadBlacklistState(), payload, Date.now());
+    writeDownloadBlacklistState(state);
+    return entry;
+}
+
+function removeDownloadBlacklistEntry(bvid) {
+    const nextState = removeBlacklistEntry(readDownloadBlacklistState(), bvid);
+    writeDownloadBlacklistState(nextState);
+    return nextState;
+}
+
+function maybeRecordYtDlpUnavailable(payload = {}) {
+    const message = String(payload.message || '').trim();
+    if (!message || !isUnavailableYtDlpMessage(message)) {
+        return null;
+    }
+
+    return recordDownloadBlacklistObservation({
+        ...payload,
+        reasonCode: payload.reasonCode || 'yt-dlp-unavailable',
+        reasonText: payload.reasonText || '资源不存在或不可访问',
+    });
 }
 
 function ensureInsideBase(targetPath) {
@@ -788,6 +850,55 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    // ── 下载黑名单状态 (供 userscript / WebUI 使用) ─────────────
+    if (req.method === 'GET' && req.url === '/api/download-blacklist') {
+        try {
+            json(res, 200, {
+                ok: true,
+                threshold: DOWNLOAD_BLACKLIST_THRESHOLD,
+                data: listDownloadBlacklistStateEntries(),
+            });
+        } catch (err) {
+            json(res, 500, { ok: false, error: err.message });
+        }
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/download-blacklist/report') {
+        let body = '';
+        req.on('data', chunk => (body += chunk));
+        req.on('end', () => {
+            try {
+                const payload = JSON.parse(body || '{}');
+                const entry = recordDownloadBlacklistObservation(payload);
+                json(res, 200, {
+                    ok: true,
+                    threshold: DOWNLOAD_BLACKLIST_THRESHOLD,
+                    blacklisted: isBlacklistedEntry(entry),
+                    data: entry,
+                });
+            } catch (err) {
+                json(res, 400, { ok: false, error: err.message });
+            }
+        });
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/download-blacklist/remove') {
+        let body = '';
+        req.on('data', chunk => (body += chunk));
+        req.on('end', () => {
+            try {
+                const payload = JSON.parse(body || '{}');
+                removeDownloadBlacklistEntry(payload?.bvid);
+                json(res, 200, { ok: true });
+            } catch (err) {
+                json(res, 400, { ok: false, error: err.message });
+            }
+        });
+        return;
+    }
+
     // ── 下载视频及保存元数据 ──────────────────────────────
     if (req.method === 'POST' && req.url === '/download-video') {
         let body = '';
@@ -802,6 +913,18 @@ const server = http.createServer((req, res) => {
                 const partTitle = String(metadata?.partTitle || '').trim();
                 if (!filename || !bvid || page <= 0 || !partTitle) {
                     throw new Error('filename、metadata.bvid、metadata.page、metadata.partTitle 不能为空');
+                }
+
+                const blacklistEntry = getDownloadBlacklistEntry(bvid);
+                if (isBlacklistedEntry(blacklistEntry)) {
+                    console.log(`[视频已在黑名单中，跳过下载] ${bvid}`);
+                    json(res, 200, {
+                        ok: true,
+                        skipped: true,
+                        blacklisted: true,
+                        blacklistEntry,
+                    });
+                    return;
                 }
 
                 const taskKey = getVideoTaskKey(metadata);
@@ -909,6 +1032,14 @@ const server = http.createServer((req, res) => {
                 }
 
                 if (!bestCandidate) {
+                    const probeMessage = lastProbeError?.message || '未找到可下载的视频格式';
+                    maybeRecordYtDlpUnavailable({
+                        bvid,
+                        title: metadata?.title,
+                        favoriteTime: metadata?.favoriteTime,
+                        source: 'yt-dlp',
+                        message: probeMessage,
+                    });
                     throw lastProbeError || new Error('未找到可下载的视频格式');
                 }
 
@@ -1000,12 +1131,20 @@ const server = http.createServer((req, res) => {
                     cleanupFile(cookieFile);
 
                     if (code !== 0) {
+                        const failureMessage = stderrBuf.slice(-1000) || `exit ${code}`;
                         writeJsonFile(infoPath, buildVideoMetadata(readJsonFile(infoPath), metadata, selectedFormat, videoPath, {
                             sourceDuration: probeInfo.duration ?? null,
                             downloadStatus: 'failed',
-                            downloadError: stderrBuf.slice(-1000) || `exit ${code}`,
+                            downloadError: failureMessage,
                             lastResolvedAt: Date.now(),
                         }));
+                        maybeRecordYtDlpUnavailable({
+                            bvid,
+                            title: metadata?.title,
+                            favoriteTime: metadata?.favoriteTime,
+                            source: 'yt-dlp',
+                            message: failureMessage,
+                        });
                         console.error(`[❌ yt-dlp 退出码 ${code}]`, stderrBuf.slice(-500));
                         return;
                     }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 弹幕下载器 v4（本地服务版）
 // @namespace    https://github.com/bilibili-danmaku-downloader
-// @version      4.0
+// @version      4.1
 // @description  配合本地 danmaku-server.mjs 服务使用，支持自定义保存目录、自动建子文件夹、同名覆盖。降级模式下退回浏览器内置下载。
 // @author       bilibili-danmaku-downloader
 // @match        *://www.bilibili.com/video/BV*
@@ -39,9 +39,25 @@
 
     // 本地文件写入服务（danmaku-server.mjs）
     const SERVER_URL = 'http://127.0.0.1:18888';
+    const DOWNLOAD_BLACKLIST_THRESHOLD_FALLBACK = 5;
     let serverAvailable = false;
 
     const MY_TAB_TOKEN = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const VIEW_UNAVAILABLE_PATTERNS = [
+        /稿件不存在/i,
+        /视频不存在/i,
+        /啥都木有/i,
+        /已失效/i,
+        /已下架/i,
+        /已删除/i,
+        /不存在或已删除/i,
+        /资源不存在/i,
+        /无法访问/i,
+        /不可访问/i,
+        /审核中/i,
+        /仅UP主自己可见/i,
+    ];
+    const UNAVAILABLE_VIEW_CODES = new Set([-404, 62002]);
 
     // ========== 工具函数 ==========
 
@@ -52,6 +68,68 @@
 
     function sanitizeFilename(name) {
         return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
+    }
+
+    function normalizeBvId(value) {
+        return String(value || '').trim().toUpperCase();
+    }
+
+    function isUnavailableViewError(error) {
+        const message = String(error?.message || '').trim();
+        const code = Number(error?.bilibiliCode);
+        if (UNAVAILABLE_VIEW_CODES.has(code)) return true;
+        return VIEW_UNAVAILABLE_PATTERNS.some(pattern => pattern.test(message));
+    }
+
+    function requestServerJson(method, endpoint, payload, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method,
+                url: `${SERVER_URL}${endpoint}`,
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                data: payload == null ? undefined : JSON.stringify(payload),
+                timeout,
+                onload: (res) => {
+                    try {
+                        const result = JSON.parse(res.responseText || '{}');
+                        if (res.status >= 200 && res.status < 300 && result.ok !== false) {
+                            resolve(result);
+                            return;
+                        }
+                        reject(new Error(result.error || `HTTP ${res.status}`));
+                    } catch (err) {
+                        reject(err);
+                    }
+                },
+                onerror: () => reject(new Error('网络请求失败')),
+                ontimeout: () => reject(new Error('请求超时')),
+            });
+        });
+    }
+
+    async function fetchDownloadBlacklistSnapshot() {
+        if (!serverAvailable) {
+            return {
+                threshold: DOWNLOAD_BLACKLIST_THRESHOLD_FALLBACK,
+                entries: [],
+                set: new Set(),
+            };
+        }
+
+        const result = await requestServerJson('GET', '/api/download-blacklist', null, 5000);
+        const entries = Array.isArray(result.data) ? result.data : [];
+        return {
+            threshold: Number(result.threshold) || DOWNLOAD_BLACKLIST_THRESHOLD_FALLBACK,
+            entries,
+            set: new Set(entries.map(entry => normalizeBvId(entry?.bvid)).filter(Boolean)),
+        };
+    }
+
+    async function reportDownloadBlacklistObservation(payload) {
+        if (!serverAvailable) {
+            throw new Error('本地服务未连接');
+        }
+        return requestServerJson('POST', '/api/download-blacklist/report', payload, 8000);
     }
 
     function fetchJson(url) {
@@ -279,10 +357,16 @@
         return [...merged.values()];
     }
 
-    function downloadVideo(filename, metadata) {
-        if (!serverAvailable) return;
+    function downloadVideo(filename, metadata, options = {}) {
+        if (!serverAvailable) return Promise.resolve({ ok: false, skipped: true, serverUnavailable: true });
+        const bvid = normalizeBvId(metadata?.bvid);
+        const blacklistSet = options.blacklistSet instanceof Set ? options.blacklistSet : null;
+        if (bvid && blacklistSet?.has(bvid)) {
+            console.log('[弹幕下载器] 视频已在黑名单中，跳过触发下载:', bvid);
+            return Promise.resolve({ ok: true, skipped: true, blacklisted: true });
+        }
 
-        const sendPayload = (cookies) => {
+        const sendPayload = (cookies) => new Promise(resolve => {
             const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
             GM_xmlhttpRequest({
                 method: 'POST',
@@ -293,25 +377,38 @@
                     try {
                         const result = JSON.parse(res.responseText);
                         if (result.skipped) {
-                            console.log('[弹幕下载器] 视频已存在，跳过');
+                            if (result.blacklisted) {
+                                console.log('[弹幕下载器] 视频命中黑名单，跳过:', metadata?.bvid);
+                                if (bvid && blacklistSet) blacklistSet.add(bvid);
+                            } else {
+                                console.log('[弹幕下载器] 视频已存在，跳过');
+                            }
                         } else if (result.ok) {
                             console.log('[弹幕下载器] 已触发服务器下载视频:', filename);
                         }
-                    } catch(e) {}
+                        resolve(result);
+                    } catch (e) {
+                        resolve({ ok: false, error: e.message });
+                    }
+                },
+                onerror: () => {
+                    resolve({ ok: false, error: '网络请求失败' });
+                },
+                ontimeout: () => {
+                    resolve({ ok: false, error: '请求超时' });
                 }
             });
-        };
+        });
 
         if (typeof GM_cookie !== 'undefined') {
-            collectBilibiliCookies()
+            return collectBilibiliCookies()
                 .then(cookies => sendPayload(cookies))
                 .catch(err => {
                     console.warn('[弹幕下载器] 读取 Cookie 失败，将使用空 Cookie:', err);
-                    sendPayload([]);
+                    return sendPayload([]);
                 });
-        } else {
-            sendPayload([]);
         }
+        return sendPayload([]);
     }
     function checkServer() {
         GM_xmlhttpRequest({
@@ -453,10 +550,38 @@
         };
     }
 
-    function queueVideoDownloads(videoData, extras = {}) {
+    async function queueVideoDownloads(videoData, extras = {}, options = {}) {
+        const providedBlacklistSet = options.blacklistSet instanceof Set ? options.blacklistSet : null;
+        const bvid = normalizeBvId(videoData?.bvid);
+        let blacklistSet = providedBlacklistSet;
+
+        if (!blacklistSet && serverAvailable) {
+            try {
+                blacklistSet = (await fetchDownloadBlacklistSnapshot()).set;
+            } catch (err) {
+                console.warn('[弹幕下载器] 获取黑名单快照失败，继续尝试下载:', err.message);
+            }
+        }
+
+        if (bvid && blacklistSet?.has(bvid)) {
+            addLog({
+                type: 'info',
+                bvid,
+                title: videoData?.title,
+                message: '视频已在黑名单中，跳过触发本地视频下载',
+            });
+            return {
+                tasks: [],
+                blacklisted: true,
+            };
+        }
+
         const tasks = buildVideoTasks(videoData, extras);
-        tasks.forEach(task => downloadVideo(task.filename, task.metadata));
-        return tasks;
+        await Promise.all(tasks.map(task => downloadVideo(task.filename, task.metadata, { blacklistSet })));
+        return {
+            tasks,
+            blacklisted: false,
+        };
     }
 
     // ========== 收藏夹 API ==========
@@ -473,21 +598,28 @@
             const medias = data.data?.medias;
             if (!medias || medias.length === 0) break;
             for (const item of medias) {
-                // 只处理视频类型，且未失效
-                if (item.type === 2 && item.attr !== 9) {
-                    allItems.push({
-                        bvid: item.bv_id || item.bvid,
-                        title: item.title,
-                        page: item.page, // 分P数
-                        favoriteTime: item.fav_time || item.ctime || item.mtime || 0,
-                    });
-                }
+                if (item.type !== 2) continue;
+                const entry = {
+                    bvid: normalizeBvId(item.bv_id || item.bvid),
+                    title: item.title,
+                    page: item.page,
+                    favoriteTime: item.fav_time || item.ctime || item.mtime || 0,
+                    invalid: item.attr === 9,
+                    reasonCode: item.attr === 9 ? 'favorite-invalid' : '',
+                    reasonText: item.attr === 9 ? '收藏夹条目已失效或下架' : '',
+                };
+                allItems.push(entry);
             }
             if (!data.data.has_more) break;
             page++;
             await sleep(300);
         }
-        return allItems;
+        return {
+            items: allItems,
+            totalCount: allItems.length,
+            availableCount: allItems.filter(item => !item.invalid).length,
+            invalidCount: allItems.filter(item => item.invalid).length,
+        };
     }
 
     // ========== 样式 ==========
@@ -1166,7 +1298,7 @@
             setStatus(`完成：${succCount} 成功, ${failCount} 失败`, 'error');
         }
 
-        queueVideoDownloads(videoInfo);
+        await queueVideoDownloads(videoInfo);
     }
 
     async function downloadMerge() {
@@ -1199,7 +1331,7 @@
         setVideoButtonsDisabled(false);
         setStatus(`✅ 合并完成！共 ${mergedResult.danmakuCount} 条弹幕`, 'success');
 
-        queueVideoDownloads(videoInfo);
+        await queueVideoDownloads(videoInfo);
     }
 
     btnSplit.addEventListener('click', downloadSplit);
@@ -1243,7 +1375,11 @@
 
     async function fetchVideoDataByBvId(bvId) {
         const viewData = await fetchJson(`https://api.bilibili.com/x/web-interface/view?bvid=${bvId}`);
-        if (viewData.code !== 0) throw new Error(viewData.message);
+        if (viewData.code !== 0) {
+            const err = new Error(viewData.message || `API 错误 ${viewData.code}`);
+            err.bilibiliCode = viewData.code;
+            throw err;
+        }
         return buildVideoDataFromView(viewData);
     }
 
@@ -1273,7 +1409,7 @@
         const pollTimestamp = formatPollTimestamp(new Date());
         // 收集本次会话每条记录，用于生成日志文件
         const sessionLines = [];
-        let totalSuccess = 0, totalFail = 0;
+        let totalSuccess = 0, totalFail = 0, totalSkipped = 0;
 
         try {
             addLog({ type: 'info', message: `开始轮询收藏夹 (ID: ${favId})` });
@@ -1281,17 +1417,107 @@
             sessionLines.push(`收藏夹 ID: ${favId}`);
             sessionLines.push('');
 
-            const videos = await fetchFavoriteList(favId);
-            addLog({ type: 'info', message: `获取到 ${videos.length} 个视频` });
-            sessionLines.push(`共 ${videos.length} 个视频`);
+            const favoriteList = await fetchFavoriteList(favId);
+            let blacklistSnapshot = {
+                threshold: DOWNLOAD_BLACKLIST_THRESHOLD_FALLBACK,
+                set: new Set(),
+            };
+            if (serverAvailable) {
+                try {
+                    blacklistSnapshot = await fetchDownloadBlacklistSnapshot();
+                } catch (err) {
+                    console.warn('[弹幕下载器] 获取黑名单快照失败:', err.message);
+                }
+            }
+
+            addLog({
+                type: 'info',
+                message: `获取到 ${favoriteList.totalCount} 个视频条目（有效 ${favoriteList.availableCount}，失效 ${favoriteList.invalidCount}）`,
+            });
+            sessionLines.push(`共 ${favoriteList.totalCount} 个视频条目（有效 ${favoriteList.availableCount}，失效 ${favoriteList.invalidCount}）`);
             sessionLines.push('─'.repeat(50));
 
-            for (let i = 0; i < videos.length; i++) {
-                const video = videos[i];
-                pollStatusEl.textContent = `⏳ 下载中 (${i + 1}/${videos.length}): ${video.title}`;
+            for (let i = 0; i < favoriteList.items.length; i++) {
+                const video = favoriteList.items[i];
+                const normalizedBvid = normalizeBvId(video.bvid);
+                pollStatusEl.textContent = `⏳ 轮询中 (${i + 1}/${favoriteList.items.length}): ${video.title}`;
+
+                if (normalizedBvid && blacklistSnapshot.set.has(normalizedBvid)) {
+                    addLog({
+                        type: 'info',
+                        bvid: normalizedBvid,
+                        title: video.title,
+                        message: '已在黑名单中，直接跳过',
+                    });
+                    sessionLines.push(`⏭️ ${video.title}`);
+                    sessionLines.push(`   ${normalizedBvid || '-'}  已在黑名单中，跳过`);
+                    sessionLines.push('');
+                    totalSkipped++;
+                    await sleep(300);
+                    continue;
+                }
+
+                if (video.invalid) {
+                    if (!normalizedBvid) {
+                        addLog({
+                            type: 'error',
+                            title: video.title,
+                            message: '收藏夹条目已失效，但未携带 BV 号，无法加入黑名单',
+                        });
+                        sessionLines.push(`❌ ${video.title}`);
+                        sessionLines.push('   收藏夹条目已失效，但缺少 BV 号，无法累计黑名单');
+                        sessionLines.push('');
+                        totalFail++;
+                        await sleep(300);
+                        continue;
+                    }
+
+                    try {
+                        const reportResult = await reportDownloadBlacklistObservation({
+                            bvid: normalizedBvid,
+                            title: video.title,
+                            reasonCode: video.reasonCode,
+                            reasonText: video.reasonText,
+                            source: 'favorites-api',
+                            message: video.reasonText,
+                            favoriteTime: video.favoriteTime,
+                        });
+                        const hitCount = Number(reportResult?.data?.hitCount) || 1;
+                        const threshold = Number(reportResult?.threshold) || DOWNLOAD_BLACKLIST_THRESHOLD_FALLBACK;
+                        const blacklisted = !!reportResult?.blacklisted;
+                        if (blacklisted) {
+                            blacklistSnapshot.set.add(normalizedBvid);
+                        }
+                        addLog({
+                            type: blacklisted ? 'error' : 'info',
+                            bvid: normalizedBvid,
+                            title: video.title,
+                            message: blacklisted
+                                ? `收藏夹条目已失效，已加入黑名单 (${hitCount}/${threshold})`
+                                : `收藏夹条目已失效，累计命中 ${hitCount}/${threshold}`,
+                        });
+                        sessionLines.push(`${blacklisted ? '🚫' : '⚠️'} ${video.title}`);
+                        sessionLines.push(`   BV: ${normalizedBvid}`);
+                        sessionLines.push(`   原因: ${video.reasonText}`);
+                        sessionLines.push(`   命中: ${hitCount}/${threshold}${blacklisted ? ' · 已加入黑名单' : ''}`);
+                    } catch (err) {
+                        addLog({
+                            type: 'error',
+                            bvid: normalizedBvid,
+                            title: video.title,
+                            message: `记录失效状态失败: ${err.message}`,
+                        });
+                        sessionLines.push(`❌ ${video.title}`);
+                        sessionLines.push(`   ${normalizedBvid}  记录失效状态失败: ${err.message}`);
+                    }
+                    sessionLines.push('');
+                    totalFail++;
+                    await sleep(300);
+                    continue;
+                }
 
                 try {
-                    const videoData = await fetchVideoDataByBvId(video.bvid);
+                    const videoData = await fetchVideoDataByBvId(normalizedBvid);
                     const groupDir = buildGroupDir(videoData.title, videoData.bvid);
                     const danmakuFolder = getDanmakuFolder(groupDir);
                     const parts = await fetchDanmakuPartsForVideoData(videoData);
@@ -1310,13 +1536,15 @@
                         }
                     }
 
-                    queueVideoDownloads(videoData, {
+                    await queueVideoDownloads(videoData, {
                         favoriteTime: video.favoriteTime,
+                    }, {
+                        blacklistSet: blacklistSnapshot.set,
                     });
 
                     addLog({
                         type: successfulParts.length === parts.length ? 'success' : 'error',
-                        bvid: video.bvid,
+                        bvid: normalizedBvid,
                         title: video.title,
                         message: `弹幕更新完成 · ${successfulParts.length}/${parts.length} P`,
                     });
@@ -1326,14 +1554,63 @@
                         totalFail++;
                     }
                 } catch (err) {
+                    if (normalizedBvid && isUnavailableViewError(err)) {
+                        try {
+                            const reportResult = await reportDownloadBlacklistObservation({
+                                bvid: normalizedBvid,
+                                title: video.title,
+                                reasonCode: 'view-unavailable',
+                                reasonText: '资源不存在或不可访问',
+                                source: 'view-api',
+                                message: err.message,
+                                favoriteTime: video.favoriteTime,
+                            });
+                            const hitCount = Number(reportResult?.data?.hitCount) || 1;
+                            const threshold = Number(reportResult?.threshold) || DOWNLOAD_BLACKLIST_THRESHOLD_FALLBACK;
+                            const blacklisted = !!reportResult?.blacklisted;
+                            if (blacklisted) {
+                                blacklistSnapshot.set.add(normalizedBvid);
+                            }
+                            addLog({
+                                type: 'error',
+                                bvid: normalizedBvid,
+                                title: video.title,
+                                message: blacklisted
+                                    ? `视频资源不可访问，已加入黑名单 (${hitCount}/${threshold})`
+                                    : `视频资源不可访问，累计命中 ${hitCount}/${threshold}`,
+                            });
+                            sessionLines.push(`${blacklisted ? '🚫' : '⚠️'} ${video.title}`);
+                            sessionLines.push(`   BV: ${normalizedBvid}`);
+                            sessionLines.push(`   View API: ${err.message}`);
+                            sessionLines.push(`   命中: ${hitCount}/${threshold}${blacklisted ? ' · 已加入黑名单' : ''}`);
+                            sessionLines.push('');
+                            totalFail++;
+                            await sleep(1000);
+                            continue;
+                        } catch (reportErr) {
+                            addLog({
+                                type: 'error',
+                                bvid: normalizedBvid,
+                                title: video.title,
+                                message: `记录资源不可访问状态失败: ${reportErr.message}`,
+                            });
+                            sessionLines.push(`❌ ${video.title}`);
+                            sessionLines.push(`   ${normalizedBvid}  View API 不可访问，且记录黑名单失败: ${reportErr.message}`);
+                            sessionLines.push('');
+                            totalFail++;
+                            await sleep(1000);
+                            continue;
+                        }
+                    }
+
                     addLog({
                         type: 'error',
-                        bvid: video.bvid,
+                        bvid: normalizedBvid,
                         title: video.title,
                         message: `下载失败: ${err.message}`,
                     });
                     sessionLines.push(`❌ ${video.title}`);
-                    sessionLines.push(`   ${video.bvid}  失败: ${err.message}`);
+                    sessionLines.push(`   ${normalizedBvid || video.bvid || '-'}  失败: ${err.message}`);
                     totalFail++;
                 }
 
@@ -1345,12 +1622,12 @@
 
             GM_setValue(STORAGE_KEYS.LAST_POLL_TIME, Date.now());
 
-            const summary = `轮询完成: ${totalSuccess} 成功, ${totalFail} 失败`;
+            const summary = `轮询完成: ${totalSuccess} 成功, ${totalFail} 失败, ${totalSkipped} 跳过`;
             addLog({ type: totalFail > 0 ? 'error' : 'success', message: summary });
 
             // 生成本次轮询的日志文件
             sessionLines.push('─'.repeat(50));
-            sessionLines.push(`合计: ${totalSuccess} 成功, ${totalFail} 失败`);
+            sessionLines.push(`合计: ${totalSuccess} 成功, ${totalFail} 失败, ${totalSkipped} 跳过`);
             const logContent = sessionLines.join('\n');
             await downloadFile(`轮询日志_${pollTimestamp}.txt`, logContent, getDanmakuLogFolder());
 

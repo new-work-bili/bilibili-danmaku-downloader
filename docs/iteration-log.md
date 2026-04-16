@@ -29,6 +29,59 @@
 ### 文档更新
 ```
 
+## 2026-04-13 v4 失效视频自动跳过与黑名单管理
+
+### 背景
+
+收藏夹轮询过程中会反复遇到已经下架、失效或不可访问的视频。旧逻辑虽然能在部分链路中识别异常，但没有统一的累计状态，也没有后续自动跳过和手动恢复入口，导致同一批无效资源会持续触发请求。
+
+### 本轮目标
+
+- 为 `v4` 增加服务端持久化的失效视频黑名单状态
+- 在收藏夹轮询与视频下载链路中统一累计命中次数
+- 达到阈值后自动跳过，不再继续触发无效下载
+- 在 WebUI 中展示黑名单，并支持手动恢复
+
+### 已完成
+
+- 新增 `src/download-blacklist.mjs`，统一处理黑名单状态、原因归类和阈值判断
+- `danmaku-server.mjs` 新增 `state/download-blacklist.json` 持久化状态文件
+- 服务端增加 `/api/download-blacklist`、`/api/download-blacklist/report`、`/api/download-blacklist/remove`
+- 服务端 `/download-video` 增加黑名单前置拦截，命中后直接返回 `blacklisted`
+- `src/get-danmaku-v4.user.js` 改为显式区分“正常条目 / 收藏夹已失效条目”
+- 收藏夹轮询现在会在开始前读取黑名单快照，并对黑名单 BV 直接跳过
+- 收藏夹接口失效、`view` 接口不可访问、`yt-dlp` 明确 404 / unavailable 错误都会累计命中
+- `webui/index.html`、`webui/app.js`、`webui/style.css` 新增独立黑名单面板和“恢复下载”操作
+- 新增 `test/download-blacklist.test.mjs` 覆盖阈值、移除和不可用归类规则
+
+### 遗留事项
+
+- 当前 WebUI 只展示已进入黑名单的条目，尚未额外展示“观察中但未达阈值”的视频
+- 手动恢复后不会立即下载，需要等待下一次收藏夹轮询重新尝试
+- WebUI 关键词搜索和弹幕叠加播放仍未实现
+
+### 涉及文件
+
+- `src/download-blacklist.mjs`
+- `src/get-danmaku-v4.user.js`
+- `danmaku-server.mjs`
+- `webui/index.html`
+- `webui/app.js`
+- `webui/style.css`
+- `test/download-blacklist.test.mjs`
+- `README.md`
+- `docs/architecture.md`
+- `docs/usage.md`
+- `docs/service-webui-security.md`
+- `docs/iteration-log.md`
+- `TODO.md`
+
+### 文档更新
+
+- README 与 usage 已同步自动跳过和 WebUI 黑名单能力
+- architecture 已补充服务端黑名单状态文件与自动跳过链路
+- service/security 已补充新接口与状态文件说明
+
 ## 2026-03-27 WebUI 文件定位稳定性与弹幕定位补强
 
 ### 背景
