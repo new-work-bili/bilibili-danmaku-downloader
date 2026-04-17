@@ -2,10 +2,12 @@ export const DOWNLOAD_BLACKLIST_THRESHOLD = 5;
 export const DOWNLOAD_BLACKLIST_STATE_VERSION = 1;
 
 const FAVORITE_INVALID_REASON_CODE = 'favorite-invalid';
+const MANUAL_BLACKLIST_REASON_CODE = 'manual-blacklist';
 const RESOURCE_UNAVAILABLE_REASON_CODE = 'resource-unavailable';
 
 const DEFAULT_REASON_TEXT = {
     [FAVORITE_INVALID_REASON_CODE]: '收藏夹条目已失效或下架',
+    [MANUAL_BLACKLIST_REASON_CODE]: '手动加入黑名单',
     [RESOURCE_UNAVAILABLE_REASON_CODE]: '资源不存在或不可访问',
 };
 
@@ -52,12 +54,21 @@ function normalizeNonEmptyString(value, fallback = '') {
     return normalized || fallback;
 }
 
+function normalizeBvidLookupKey(value) {
+    return normalizeNonEmptyString(value).toUpperCase();
+}
+
 function normalizeSource(source) {
     const value = normalizeNonEmptyString(source);
-    if (value === 'favorites-api' || value === 'view-api' || value === 'yt-dlp') {
+    if (value === 'favorites-api' || value === 'view-api' || value === 'yt-dlp' || value === 'manual') {
         return value;
     }
     return 'favorites-api';
+}
+
+function normalizeUploaderMid(value) {
+    const normalized = normalizeNonEmptyString(value);
+    return normalized.replace(/[^\d]/g, '') || '';
 }
 
 function matchPatterns(value, patterns) {
@@ -91,6 +102,16 @@ export function normalizeBlacklistReason({ reasonCode, reasonText, message } = {
         return {
             reasonCode: FAVORITE_INVALID_REASON_CODE,
             reasonText: normalizedText || DEFAULT_REASON_TEXT[FAVORITE_INVALID_REASON_CODE],
+        };
+    }
+
+    if (
+        normalizedCode === MANUAL_BLACKLIST_REASON_CODE
+        || normalizedCode === 'manual_blacklist'
+    ) {
+        return {
+            reasonCode: MANUAL_BLACKLIST_REASON_CODE,
+            reasonText: normalizedText || DEFAULT_REASON_TEXT[MANUAL_BLACKLIST_REASON_CODE],
         };
     }
 
@@ -134,8 +155,10 @@ export function createEmptyBlacklistState() {
 }
 
 function normalizeStoredEntry(entry, fallbackBvid) {
-    const bvid = normalizeNonEmptyString(entry?.bvid || fallbackBvid).toUpperCase();
-    if (!bvid) return null;
+    const storedBvid = normalizeNonEmptyString(entry?.bvid || fallbackBvid);
+    const bvidKey = normalizeBvidLookupKey(storedBvid);
+    if (!bvidKey) return null;
+    const bvid = normalizeNonEmptyString(entry?.bvid, bvidKey);
 
     const reason = normalizeBlacklistReason({
         reasonCode: entry?.reasonCode,
@@ -147,6 +170,8 @@ function normalizeStoredEntry(entry, fallbackBvid) {
     return {
         bvid,
         title: normalizeNonEmptyString(entry?.title, bvid),
+        uploader: normalizeNonEmptyString(entry?.uploader),
+        uploaderMid: normalizeUploaderMid(entry?.uploaderMid),
         status: entry?.status === 'blacklisted' ? 'blacklisted' : 'observed',
         reasonCode: reason.reasonCode,
         reasonText: reason.reasonText,
@@ -169,7 +194,7 @@ export function normalizeBlacklistState(rawState) {
     Object.entries(sourceItems).forEach(([key, entry]) => {
         const normalized = normalizeStoredEntry(entry, key);
         if (normalized?.bvid) {
-            items[normalized.bvid] = normalized;
+            items[normalizeBvidLookupKey(normalized.bvid)] = normalized;
         }
     });
 
@@ -181,9 +206,9 @@ export function normalizeBlacklistState(rawState) {
 }
 
 export function getBlacklistEntry(state, bvid) {
-    const normalizedBvid = normalizeNonEmptyString(bvid).toUpperCase();
-    if (!normalizedBvid) return null;
-    return normalizeBlacklistState(state).items[normalizedBvid] || null;
+    const bvidKey = normalizeBvidLookupKey(bvid);
+    if (!bvidKey) return null;
+    return normalizeBlacklistState(state).items[bvidKey] || null;
 }
 
 export function isBlacklistedEntry(entry) {
@@ -202,21 +227,29 @@ export function listBlacklistedEntries(state) {
 
 export function recordBlacklistObservation(state, payload, now = Date.now()) {
     const normalizedState = normalizeBlacklistState(state);
-    const bvid = normalizeNonEmptyString(payload?.bvid).toUpperCase();
-    if (!bvid) {
+    const bvidKey = normalizeBvidLookupKey(payload?.bvid);
+    if (!bvidKey) {
         throw new Error('bvid 不能为空');
     }
 
-    const existing = normalizedState.items[bvid];
+    const existing = normalizedState.items[bvidKey];
     const reason = normalizeBlacklistReason(payload);
-    const hitCount = (Number(existing?.hitCount) || 0) + 1;
+    const increment = payload?.skipIncrement ? 0 : 1;
+    const baseHitCount = Number(existing?.hitCount) || 0;
+    const forcedBlacklisted = payload?.forceBlacklisted === true;
+    const hitCount = forcedBlacklisted
+        ? DOWNLOAD_BLACKLIST_THRESHOLD
+        : Math.min(baseHitCount + increment, DOWNLOAD_BLACKLIST_THRESHOLD);
     const firstSeenAt = normalizeTimestamp(existing?.firstSeenAt) || now;
     const favoriteTime = normalizeTimestamp(payload?.favoriteTime) || existing?.favoriteTime || null;
+    const bvid = normalizeNonEmptyString(payload?.bvid, existing?.bvid || bvidKey);
 
     const entry = {
         bvid,
         title: normalizeNonEmptyString(payload?.title, existing?.title || bvid),
-        status: hitCount >= DOWNLOAD_BLACKLIST_THRESHOLD ? 'blacklisted' : 'observed',
+        uploader: normalizeNonEmptyString(payload?.uploader, existing?.uploader || ''),
+        uploaderMid: normalizeUploaderMid(payload?.uploaderMid || existing?.uploaderMid || ''),
+        status: forcedBlacklisted || existing?.status === 'blacklisted' || hitCount >= DOWNLOAD_BLACKLIST_THRESHOLD ? 'blacklisted' : 'observed',
         reasonCode: reason.reasonCode,
         reasonText: reason.reasonText,
         hitCount,
@@ -228,7 +261,7 @@ export function recordBlacklistObservation(state, payload, now = Date.now()) {
         favoriteTime,
     };
 
-    normalizedState.items[bvid] = entry;
+    normalizedState.items[bvidKey] = entry;
     return {
         state: normalizedState,
         entry,
@@ -237,11 +270,11 @@ export function recordBlacklistObservation(state, payload, now = Date.now()) {
 
 export function removeBlacklistEntry(state, bvid) {
     const normalizedState = normalizeBlacklistState(state);
-    const normalizedBvid = normalizeNonEmptyString(bvid).toUpperCase();
-    if (!normalizedBvid) {
+    const bvidKey = normalizeBvidLookupKey(bvid);
+    if (!bvidKey) {
         throw new Error('bvid 不能为空');
     }
 
-    delete normalizedState.items[normalizedBvid];
+    delete normalizedState.items[bvidKey];
     return normalizedState;
 }

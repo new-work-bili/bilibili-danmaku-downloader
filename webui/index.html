@@ -43,26 +43,13 @@
                         <option value="__all__">全部UP主</option>
                     </select>
                 </div>
-            </section>
-
-            <section id="blacklist-panel" class="blacklist-panel hidden">
-                <div class="blacklist-panel-header">
-                    <div>
-                        <p class="blacklist-eyebrow">失效视频黑名单</p>
-                        <h2>自动跳过列表</h2>
-                    </div>
-                    <div class="blacklist-panel-actions">
-                        <span id="blacklist-count" class="badge">0 个条目</span>
-                        <button id="blacklist-toggle" class="btn btn-outline btn-blacklist-toggle" type="button" aria-expanded="false">
-                            展开
-                        </button>
-                    </div>
-                </div>
-                <div id="blacklist-summary" class="blacklist-summary"></div>
-                <div id="blacklist-content" class="blacklist-content hidden">
-                    <p class="blacklist-panel-desc">命中阈值的下架、失效或不可访问视频会出现在这里。恢复后不会立即下载，下次收藏夹轮询会重新尝试。</p>
-                    <div id="blacklist-empty" class="blacklist-empty hidden">当前没有已拉黑的视频。</div>
-                    <div id="blacklist-list" class="blacklist-list"></div>
+                <div class="toolbar-group">
+                    <label for="blacklist-select">状态筛选</label>
+                    <select id="blacklist-select" class="toolbar-select">
+                        <option value="all">全部视频</option>
+                        <option value="blacklisted">仅已标记</option>
+                        <option value="normal">排除已标记</option>
+                    </select>
                 </div>
             </section>
 

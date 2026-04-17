@@ -99,13 +99,13 @@ function getDownloadBlacklistEntry(bvid) {
 }
 
 function listDownloadBlacklistStateEntries() {
-    return listBlacklistedEntries(readDownloadBlacklistState());
+    return listBlacklistedEntries(readDownloadBlacklistState()).map(enrichBlacklistEntry);
 }
 
 function recordDownloadBlacklistObservation(payload = {}) {
     const { state, entry } = recordBlacklistObservation(readDownloadBlacklistState(), payload, Date.now());
     writeDownloadBlacklistState(state);
-    return entry;
+    return enrichBlacklistEntry(entry);
 }
 
 function removeDownloadBlacklistEntry(bvid) {
@@ -127,6 +127,17 @@ function maybeRecordYtDlpUnavailable(payload = {}) {
     });
 }
 
+function enrichBlacklistEntry(entry) {
+    if (!entry) return null;
+    return {
+        ...entry,
+        uploader: entry.uploader || '',
+        uploaderMid: entry.uploaderMid || '',
+        videoUrl: buildBilibiliVideoUrl(entry.bvid),
+        uploaderUrl: buildBilibiliUploaderUrl(entry.uploaderMid),
+    };
+}
+
 function ensureInsideBase(targetPath) {
     const resolved = path.resolve(targetPath);
     if (resolved !== BASE_DIR_RESOLVED && !resolved.startsWith(`${BASE_DIR_RESOLVED}${path.sep}`)) {
@@ -146,6 +157,27 @@ function normalizeTimestamp(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric) || numeric <= 0) return null;
     return numeric < 1e12 ? numeric * 1000 : numeric;
+}
+
+function normalizeBvidLookupKey(value) {
+    return String(value || '').trim().toUpperCase();
+}
+
+function preferCanonicalBvid(existing, candidate) {
+    const left = String(existing || '').trim();
+    const right = String(candidate || '').trim();
+    if (!left) return right;
+    if (!right) return left;
+    if (normalizeBvidLookupKey(left) !== normalizeBvidLookupKey(right)) {
+        return left;
+    }
+
+    const leftHasLowercase = /[a-z]/.test(left);
+    const rightHasLowercase = /[a-z]/.test(right);
+    if (rightHasLowercase && !leftHasLowercase) {
+        return right;
+    }
+    return left;
 }
 
 function toSafePathSegment(value, fallback = 'untitled') {
@@ -544,7 +576,7 @@ function listGroupedVideoCards() {
             const baseName = file.slice(0, -'.info.json'.length);
             const partDir = path.dirname(fullPath);
             const groupDir = getVideoGroupDir(info);
-            const cardKey = info.bvid || groupDir;
+            const cardKey = normalizeBvidLookupKey(info.bvid) || groupDir;
             const videoPath = findDownloadedVideoByBaseName(partDir, baseName);
             const videoFile = videoPath ? path.basename(videoPath) : null;
             const favoriteTime = normalizeTimestamp(info.favoriteTime || info.favTime);
@@ -604,13 +636,14 @@ function listGroupedVideoCards() {
             }
 
             const card = cards.get(cardKey);
+            card.bvid = preferCanonicalBvid(card.bvid, info.bvid);
             card.title = card.title || info.title || groupDir;
             card.cover = card.cover || info.cover || '';
             card.folderPath = partDir;
             card.uploader = card.uploader || info.uploader || '';
             card.uploaderMid = card.uploaderMid || info.uploaderMid || '';
             card.uploaderUrl = card.uploaderUrl || buildBilibiliUploaderUrl(card.uploaderMid);
-            card.videoUrl = card.videoUrl || buildBilibiliVideoUrl(info.bvid);
+            card.videoUrl = buildBilibiliVideoUrl(card.bvid);
             card.favoriteTime = card.favoriteTime || favoriteTime;
             card.publishTime = card.publishTime || publishTime;
             card.partCount = Math.max(card.partCount, Number(info.partCount) || 0, card.parts.length + 1);
@@ -638,6 +671,65 @@ function listGroupedVideoCards() {
             return card;
         })
         .sort((a, b) => (b.updateTime || 0) - (a.updateTime || 0));
+}
+
+function mergeBlacklistIntoCards(cards = [], blacklistEntries = []) {
+    const mergedCards = new Map();
+
+    cards.forEach(card => {
+        if (!card?.bvid) return;
+        mergedCards.set(normalizeBvidLookupKey(card.bvid), {
+            ...card,
+            isBlacklisted: false,
+            blacklistInfo: null,
+        });
+    });
+
+    blacklistEntries.forEach(entry => {
+        if (!entry?.bvid) return;
+        const cardKey = normalizeBvidLookupKey(entry.bvid);
+        const existing = mergedCards.get(cardKey);
+        if (existing) {
+            mergedCards.set(cardKey, {
+                ...existing,
+                bvid: preferCanonicalBvid(existing.bvid, entry.bvid),
+                isBlacklisted: true,
+                blacklistInfo: entry,
+                favoriteTime: existing.favoriteTime || entry.favoriteTime || null,
+                uploader: existing.uploader || entry.uploader || '',
+                uploaderMid: existing.uploaderMid || entry.uploaderMid || '',
+                uploaderUrl: existing.uploaderUrl || entry.uploaderUrl || '',
+                videoUrl: existing.videoUrl || entry.videoUrl || '',
+                updateTime: Math.max(existing.updateTime || 0, entry.lastSeenAt || 0),
+            });
+            return;
+        }
+
+        mergedCards.set(cardKey, {
+            bvid: entry.bvid,
+            title: entry.title || entry.bvid,
+            cover: '',
+            uploader: entry.uploader || '',
+            uploaderMid: entry.uploaderMid || '',
+            uploaderUrl: entry.uploaderUrl || '',
+            videoUrl: entry.videoUrl || '',
+            folderPath: '',
+            groupDir: '',
+            partCount: 0,
+            hasMultipleParts: false,
+            favoriteTime: entry.favoriteTime || null,
+            publishTime: null,
+            updateTime: entry.lastSeenAt || entry.firstSeenAt || Date.now(),
+            parts: [],
+            primaryVideoPath: null,
+            primaryDanmakuPath: null,
+            isBlacklisted: true,
+            blacklistInfo: entry,
+            blacklistOnly: true,
+        });
+    });
+
+    return [...mergedCards.values()].sort((a, b) => (b.updateTime || 0) - (a.updateTime || 0));
 }
 
 function spawnDetached(command, args) {
@@ -899,6 +991,33 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    if (req.method === 'POST' && req.url === '/api/download-blacklist/mark') {
+        let body = '';
+        req.on('data', chunk => (body += chunk));
+        req.on('end', () => {
+            try {
+                const payload = JSON.parse(body || '{}');
+                const entry = recordDownloadBlacklistObservation({
+                    ...payload,
+                    forceBlacklisted: true,
+                    reasonCode: payload?.reasonCode || 'manual-blacklist',
+                    reasonText: payload?.reasonText || '手动加入黑名单',
+                    source: payload?.source || 'manual',
+                    message: payload?.message || '手动加入黑名单',
+                });
+                json(res, 200, {
+                    ok: true,
+                    threshold: DOWNLOAD_BLACKLIST_THRESHOLD,
+                    blacklisted: true,
+                    data: entry,
+                });
+            } catch (err) {
+                json(res, 400, { ok: false, error: err.message });
+            }
+        });
+        return;
+    }
+
     // ── 下载视频及保存元数据 ──────────────────────────────
     if (req.method === 'POST' && req.url === '/download-video') {
         let body = '';
@@ -922,7 +1041,7 @@ const server = http.createServer((req, res) => {
                         ok: true,
                         skipped: true,
                         blacklisted: true,
-                        blacklistEntry,
+                        blacklistEntry: enrichBlacklistEntry(blacklistEntry),
                     });
                     return;
                 }
@@ -1177,7 +1296,9 @@ const server = http.createServer((req, res) => {
     // ── 获取已下载的视频列表 (供WebUI使用) ───────────────
     if (req.method === 'GET' && req.url === '/api/videos') {
         try {
-            json(res, 200, { ok: true, data: listGroupedVideoCards() });
+            const cards = listGroupedVideoCards();
+            const blacklistEntries = listDownloadBlacklistStateEntries();
+            json(res, 200, { ok: true, data: mergeBlacklistIntoCards(cards, blacklistEntries) });
         } catch (err) {
             json(res, 500, { ok: false, error: err.message });
         }

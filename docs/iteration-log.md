@@ -29,6 +29,56 @@
 ### 文档更新
 ```
 
+## 2026-04-17 黑名单交互回收至主视频流
+
+### 背景
+
+上一轮把黑名单做成了独立面板和单独详情入口，但在真实使用里会挤占首屏，和正常视频流割裂，查找与处理成本都偏高。新的目标是不再单独维护一块“黑名单区”，而是让黑名单视频继续留在原视频卡片流里，只增加必要标识和筛选能力。
+
+### 本轮目标
+
+- 取消独立黑名单面板 / 详情页入口
+- 让黑名单视频与普通视频统一使用同一套卡片布局
+- 让 WebUI 支持直接把任意视频加入黑名单
+- 让工具栏支持只看黑名单或排除黑名单
+
+### 已完成
+
+- `danmaku-server.mjs` 的 `/api/videos` 现在会把黑名单条目直接合并进主卡片数据流
+- 已下载视频若命中黑名单，会在原卡片上附带 `isBlacklisted + blacklistInfo`
+- 仅存在于黑名单中的 BV 也会以占位卡片形式出现在主视频流里
+- 新增 `POST /api/download-blacklist/mark`，支持从 WebUI 直接手动加入黑名单
+- `webui/index.html` 把黑名单交互收回到主工具栏中的“状态筛选”
+- `webui/app.js` 在主卡片和详情弹层中增加“加入黑名单 / 移出黑名单”
+- 黑名单视频继续保留原视频页和 UP 主空间跳转入口
+- 黑名单详细原因、命中次数、最近来源、首次 / 最近发现时间与错误摘要改为在详情弹层中查看
+- `src/download-blacklist.mjs` 增加 `manual` 来源归类，避免手动加入后仍显示成收藏夹来源
+
+### 遗留事项
+
+- 当前仍只展示已进入黑名单的条目，不额外展示“观察中”状态
+- 手动移出黑名单后不会立即下载，仍需等待下一次收藏夹轮询
+- WebUI 关键词搜索和弹幕叠加播放仍未实现
+
+### 涉及文件
+
+- `src/download-blacklist.mjs`
+- `danmaku-server.mjs`
+- `webui/index.html`
+- `webui/app.js`
+- `webui/style.css`
+- `test/download-blacklist.test.mjs`
+- `README.md`
+- `docs/usage.md`
+- `docs/service-webui-security.md`
+- `docs/iteration-log.md`
+- `TODO.md`
+
+### 文档更新
+
+- README、usage、service/security 与 TODO 已同步改为“主视频流内联黑名单”描述
+- 本文补记了黑名单交互从独立面板回收到主视频流的原因和结果
+
 ## 2026-04-13 v4 失效视频自动跳过与黑名单管理
 
 ### 背景

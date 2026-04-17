@@ -71,7 +71,11 @@
     }
 
     function normalizeBvId(value) {
-        return String(value || '').trim().toUpperCase();
+        return String(value || '').trim();
+    }
+
+    function getBvIdLookupKey(value) {
+        return normalizeBvId(value).toUpperCase();
     }
 
     function isUnavailableViewError(error) {
@@ -121,7 +125,7 @@
         return {
             threshold: Number(result.threshold) || DOWNLOAD_BLACKLIST_THRESHOLD_FALLBACK,
             entries,
-            set: new Set(entries.map(entry => normalizeBvId(entry?.bvid)).filter(Boolean)),
+            set: new Set(entries.map(entry => getBvIdLookupKey(entry?.bvid)).filter(Boolean)),
         };
     }
 
@@ -130,6 +134,13 @@
             throw new Error('本地服务未连接');
         }
         return requestServerJson('POST', '/api/download-blacklist/report', payload, 8000);
+    }
+
+    async function removeDownloadBlacklistEntry(payload) {
+        if (!serverAvailable) {
+            throw new Error('本地服务未连接');
+        }
+        return requestServerJson('POST', '/api/download-blacklist/remove', payload, 8000);
     }
 
     function fetchJson(url) {
@@ -360,8 +371,9 @@
     function downloadVideo(filename, metadata, options = {}) {
         if (!serverAvailable) return Promise.resolve({ ok: false, skipped: true, serverUnavailable: true });
         const bvid = normalizeBvId(metadata?.bvid);
+        const bvidKey = getBvIdLookupKey(bvid);
         const blacklistSet = options.blacklistSet instanceof Set ? options.blacklistSet : null;
-        if (bvid && blacklistSet?.has(bvid)) {
+        if (bvidKey && blacklistSet?.has(bvidKey)) {
             console.log('[弹幕下载器] 视频已在黑名单中，跳过触发下载:', bvid);
             return Promise.resolve({ ok: true, skipped: true, blacklisted: true });
         }
@@ -379,7 +391,7 @@
                         if (result.skipped) {
                             if (result.blacklisted) {
                                 console.log('[弹幕下载器] 视频命中黑名单，跳过:', metadata?.bvid);
-                                if (bvid && blacklistSet) blacklistSet.add(bvid);
+                                if (bvidKey && blacklistSet) blacklistSet.add(bvidKey);
                             } else {
                                 console.log('[弹幕下载器] 视频已存在，跳过');
                             }
@@ -553,6 +565,7 @@
     async function queueVideoDownloads(videoData, extras = {}, options = {}) {
         const providedBlacklistSet = options.blacklistSet instanceof Set ? options.blacklistSet : null;
         const bvid = normalizeBvId(videoData?.bvid);
+        const bvidKey = getBvIdLookupKey(bvid);
         let blacklistSet = providedBlacklistSet;
 
         if (!blacklistSet && serverAvailable) {
@@ -563,7 +576,7 @@
             }
         }
 
-        if (bvid && blacklistSet?.has(bvid)) {
+        if (bvidKey && blacklistSet?.has(bvidKey)) {
             addLog({
                 type: 'info',
                 bvid,
@@ -602,6 +615,8 @@
                 const entry = {
                     bvid: normalizeBvId(item.bv_id || item.bvid),
                     title: item.title,
+                    uploader: item.upper?.name || item.upper?.uname || '',
+                    uploaderMid: item.upper?.mid || item.upper?.id || '',
                     page: item.page,
                     favoriteTime: item.fav_time || item.ctime || item.mtime || 0,
                     invalid: item.attr === 9,
@@ -1440,9 +1455,52 @@
             for (let i = 0; i < favoriteList.items.length; i++) {
                 const video = favoriteList.items[i];
                 const normalizedBvid = normalizeBvId(video.bvid);
+                const bvidKey = getBvIdLookupKey(normalizedBvid);
+                let prefetchedVideoData = null;
                 pollStatusEl.textContent = `⏳ 轮询中 (${i + 1}/${favoriteList.items.length}): ${video.title}`;
 
-                if (normalizedBvid && blacklistSnapshot.set.has(normalizedBvid)) {
+                if (bvidKey && blacklistSnapshot.set.has(bvidKey)) {
+                    if (!video.invalid) {
+                        try {
+                            prefetchedVideoData = await fetchVideoDataByBvId(normalizedBvid);
+                            await removeDownloadBlacklistEntry({ bvid: normalizedBvid });
+                            blacklistSnapshot.set.delete(bvidKey);
+                            addLog({
+                                type: 'success',
+                                bvid: normalizedBvid,
+                                title: video.title,
+                                message: '检测到视频仍可访问，已自动恢复下载',
+                            });
+                            sessionLines.push(`♻️ ${video.title}`);
+                            sessionLines.push(`   BV: ${normalizedBvid}`);
+                            sessionLines.push('   复核结果: 视频仍可访问，已自动恢复下载');
+                            sessionLines.push('');
+                        } catch (err) {
+                            if (!isUnavailableViewError(err)) {
+                                console.warn('[弹幕下载器] 黑名单视频复核失败，沿用当前状态:', err.message);
+                            }
+                        }
+                    }
+
+                    if (blacklistSnapshot.set.has(bvidKey)) {
+                    if (serverAvailable) {
+                        try {
+                            await reportDownloadBlacklistObservation({
+                                bvid: normalizedBvid,
+                                title: video.title,
+                                uploader: video.uploader,
+                                uploaderMid: video.uploaderMid,
+                                reasonCode: video.invalid ? video.reasonCode : 'view-unavailable',
+                                reasonText: video.invalid ? video.reasonText : '资源不存在或不可访问',
+                                source: 'favorites-api',
+                                message: video.reasonText || '黑名单元数据同步',
+                                favoriteTime: video.favoriteTime,
+                                skipIncrement: true,
+                            });
+                        } catch (err) {
+                            console.warn('[弹幕下载器] 黑名单元数据同步失败:', err.message);
+                        }
+                    }
                     addLog({
                         type: 'info',
                         bvid: normalizedBvid,
@@ -1455,6 +1513,7 @@
                     totalSkipped++;
                     await sleep(300);
                     continue;
+                    }
                 }
 
                 if (video.invalid) {
@@ -1476,6 +1535,8 @@
                         const reportResult = await reportDownloadBlacklistObservation({
                             bvid: normalizedBvid,
                             title: video.title,
+                            uploader: video.uploader,
+                            uploaderMid: video.uploaderMid,
                             reasonCode: video.reasonCode,
                             reasonText: video.reasonText,
                             source: 'favorites-api',
@@ -1486,7 +1547,7 @@
                         const threshold = Number(reportResult?.threshold) || DOWNLOAD_BLACKLIST_THRESHOLD_FALLBACK;
                         const blacklisted = !!reportResult?.blacklisted;
                         if (blacklisted) {
-                            blacklistSnapshot.set.add(normalizedBvid);
+                            blacklistSnapshot.set.add(bvidKey);
                         }
                         addLog({
                             type: blacklisted ? 'error' : 'info',
@@ -1517,7 +1578,7 @@
                 }
 
                 try {
-                    const videoData = await fetchVideoDataByBvId(normalizedBvid);
+                    const videoData = prefetchedVideoData || await fetchVideoDataByBvId(normalizedBvid);
                     const groupDir = buildGroupDir(videoData.title, videoData.bvid);
                     const danmakuFolder = getDanmakuFolder(groupDir);
                     const parts = await fetchDanmakuPartsForVideoData(videoData);
@@ -1559,6 +1620,8 @@
                             const reportResult = await reportDownloadBlacklistObservation({
                                 bvid: normalizedBvid,
                                 title: video.title,
+                                uploader: video.uploader,
+                                uploaderMid: video.uploaderMid,
                                 reasonCode: 'view-unavailable',
                                 reasonText: '资源不存在或不可访问',
                                 source: 'view-api',
@@ -1569,7 +1632,7 @@
                             const threshold = Number(reportResult?.threshold) || DOWNLOAD_BLACKLIST_THRESHOLD_FALLBACK;
                             const blacklisted = !!reportResult?.blacklisted;
                             if (blacklisted) {
-                                blacklistSnapshot.set.add(normalizedBvid);
+                                blacklistSnapshot.set.add(bvidKey);
                             }
                             addLog({
                                 type: 'error',

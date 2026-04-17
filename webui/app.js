@@ -1,5 +1,7 @@
 const FILTER_ALL = '__all__';
-const BLACKLIST_EXPANDED_STORAGE_KEY = 'ddl_webui_blacklist_expanded';
+const BLACKLIST_FILTER_ALL = 'all';
+const BLACKLIST_FILTER_ONLY = 'blacklisted';
+const BLACKLIST_FILTER_EXCLUDE = 'normal';
 const DEFAULT_COVER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360">
   <defs>
@@ -18,24 +20,16 @@ const DEFAULT_COVER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
 
 const appState = {
     cards: [],
-    blacklistEntries: [],
-    blacklistThreshold: 5,
-    blacklistExpanded: false,
     sortBy: 'updateTime',
     uploaderFilter: FILTER_ALL,
+    blacklistFilter: BLACKLIST_FILTER_ALL,
 };
 
 document.addEventListener('DOMContentLoaded', () => {
     const refreshBtn = document.getElementById('refresh-btn');
-    const blacklistToggle = document.getElementById('blacklist-toggle');
+    const blacklistSelect = document.getElementById('blacklist-select');
     const sortSelect = document.getElementById('sort-select');
     const uploaderSelect = document.getElementById('uploader-select');
-
-    try {
-        appState.blacklistExpanded = localStorage.getItem(BLACKLIST_EXPANDED_STORAGE_KEY) === 'true';
-    } catch (_) {
-        appState.blacklistExpanded = false;
-    }
 
     sortSelect.addEventListener('change', (event) => {
         appState.sortBy = event.target.value || 'updateTime';
@@ -47,7 +41,11 @@ document.addEventListener('DOMContentLoaded', () => {
         renderCurrentView();
     });
 
-    blacklistToggle.addEventListener('click', toggleBlacklistPanel);
+    blacklistSelect.addEventListener('change', (event) => {
+        appState.blacklistFilter = event.target.value || BLACKLIST_FILTER_ALL;
+        renderCurrentView();
+    });
+
     refreshBtn.addEventListener('click', loadVideos);
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') {
@@ -110,15 +108,22 @@ function compareCards(left, right) {
 
 function getFilteredCards() {
     const uploaderFilter = appState.uploaderFilter;
-    const visibleCards = uploaderFilter === FILTER_ALL
+    let visibleCards = uploaderFilter === FILTER_ALL
         ? appState.cards
         : appState.cards.filter(card => getUploaderName(card) === uploaderFilter);
+
+    if (appState.blacklistFilter === BLACKLIST_FILTER_ONLY) {
+        visibleCards = visibleCards.filter(card => card.isBlacklisted);
+    } else if (appState.blacklistFilter === BLACKLIST_FILTER_EXCLUDE) {
+        visibleCards = visibleCards.filter(card => !card.isBlacklisted);
+    }
 
     return [...visibleCards].sort(compareCards);
 }
 
 function updateToolbarOptions(cards) {
     const toolbar = document.getElementById('toolbar');
+    const blacklistSelect = document.getElementById('blacklist-select');
     const uploaderSelect = document.getElementById('uploader-select');
     const uniqueUploaders = [...new Set(cards.map(getUploaderName))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
 
@@ -140,6 +145,7 @@ function updateToolbarOptions(cards) {
         appState.uploaderFilter = FILTER_ALL;
     }
     uploaderSelect.value = appState.uploaderFilter;
+    blacklistSelect.value = appState.blacklistFilter;
 
     toolbar.classList.toggle('hidden', cards.length === 0);
 }
@@ -157,96 +163,31 @@ function formatBlacklistSource(source) {
     if (source === 'favorites-api') return '收藏夹接口';
     if (source === 'view-api') return '视频详情接口';
     if (source === 'yt-dlp') return 'yt-dlp';
+    if (source === 'manual') return '手动加入';
     return source || '未知来源';
 }
 
 function getBlacklistThreshold(entry) {
-    return Number(entry?.threshold) || appState.blacklistThreshold || 5;
+    return Number(entry?.threshold) || 5;
 }
 
-function persistBlacklistExpanded() {
-    try {
-        localStorage.setItem(BLACKLIST_EXPANDED_STORAGE_KEY, String(appState.blacklistExpanded));
-    } catch (_) {
-        // ignore persistence errors
-    }
-}
-
-function setBlacklistPanelExpanded(expanded) {
-    appState.blacklistExpanded = !!expanded;
-    persistBlacklistExpanded();
-    renderBlacklistPanel();
-}
-
-function toggleBlacklistPanel() {
-    setBlacklistPanelExpanded(!appState.blacklistExpanded);
-}
-
-function renderBlacklistPanel() {
-    const panel = document.getElementById('blacklist-panel');
-    const content = document.getElementById('blacklist-content');
-    const list = document.getElementById('blacklist-list');
-    const empty = document.getElementById('blacklist-empty');
-    const count = document.getElementById('blacklist-count');
-    const summary = document.getElementById('blacklist-summary');
-    const toggle = document.getElementById('blacklist-toggle');
-    const entries = Array.isArray(appState.blacklistEntries) ? appState.blacklistEntries : [];
-
-    if (entries.length === 0) {
-        panel.classList.add('hidden');
-        return;
+function getMarkedStateMeta(cardData) {
+    const reasonCode = String(cardData?.blacklistInfo?.reasonCode || '').trim();
+    if (reasonCode === 'manual-blacklist') {
+        return {
+            badgeText: '手动跳过',
+            actionLabel: '恢复下载',
+            addActionLabel: '手动跳过',
+            statusTitle: '该视频被手动标记为跳过，当前不会继续尝试下载',
+        };
     }
 
-    count.textContent = `${entries.length} 个条目`;
-    panel.classList.remove('hidden');
-    list.innerHTML = '';
-    summary.textContent = `当前有 ${entries.length} 个视频已进入自动跳过列表。默认折叠，按需展开查看详情和恢复下载。`;
-    toggle.textContent = appState.blacklistExpanded ? '收起' : '展开';
-    toggle.setAttribute('aria-expanded', appState.blacklistExpanded ? 'true' : 'false');
-    panel.classList.toggle('is-expanded', appState.blacklistExpanded);
-    content.classList.toggle('hidden', !appState.blacklistExpanded);
-
-    empty.classList.add('hidden');
-    entries.forEach(entry => {
-        const item = document.createElement('article');
-        item.className = 'blacklist-item';
-        item.innerHTML = `
-            <div class="blacklist-item-main">
-                <div class="blacklist-item-header">
-                    <div>
-                        <div class="blacklist-item-title">${escapeHtml(entry.title || entry.bvid || '未知视频')}</div>
-                        <div class="blacklist-item-bvid">${escapeHtml(entry.bvid || '未知 BV')}</div>
-                    </div>
-                    <span class="blacklist-hit-chip">${escapeHtml(`${Number(entry.hitCount) || 0}/${getBlacklistThreshold(entry)}`)}</span>
-                </div>
-                <div class="blacklist-item-grid">
-                    <div class="blacklist-meta-card">
-                        <span class="blacklist-meta-label">当前原因</span>
-                        <span class="blacklist-meta-value">${escapeHtml(entry.reasonText || '资源不存在或不可访问')}</span>
-                    </div>
-                    <div class="blacklist-meta-card">
-                        <span class="blacklist-meta-label">最近来源</span>
-                        <span class="blacklist-meta-value">${escapeHtml(formatBlacklistSource(entry.lastSource))}</span>
-                    </div>
-                    <div class="blacklist-meta-card">
-                        <span class="blacklist-meta-label">首次发现</span>
-                        <span class="blacklist-meta-value">${escapeHtml(formatDate(entry.firstSeenAt))}</span>
-                    </div>
-                    <div class="blacklist-meta-card">
-                        <span class="blacklist-meta-label">最近发现</span>
-                        <span class="blacklist-meta-value">${escapeHtml(formatDate(entry.lastSeenAt))}</span>
-                    </div>
-                </div>
-                <div class="blacklist-message">${escapeHtml(entry.lastMessage || '无额外错误摘要')}</div>
-            </div>
-            <div class="blacklist-item-actions">
-                <button class="btn btn-outline btn-blacklist-restore">恢复下载</button>
-            </div>
-        `;
-
-        item.querySelector('.btn-blacklist-restore').addEventListener('click', () => restoreBlacklistEntry(entry));
-        list.appendChild(item);
-    });
+    return {
+        badgeText: '已失效',
+        actionLabel: '恢复下载',
+        addActionLabel: '标记跳过',
+        statusTitle: '该视频当前被标记为已失效，暂不继续尝试下载',
+    };
 }
 
 function setEmptyState(message) {
@@ -255,12 +196,22 @@ function setEmptyState(message) {
     document.getElementById('video-grid').classList.add('hidden');
 }
 
+function getEmptyStateMessage() {
+    if (appState.cards.length === 0) {
+        return '暂无下载的视频或弹幕';
+    }
+    if (appState.blacklistFilter === BLACKLIST_FILTER_ONLY) {
+        return '当前还没有已标记视频';
+    }
+    return '当前筛选条件下没有匹配的视频';
+}
+
 function renderCurrentView() {
     const filteredCards = getFilteredCards();
     updateCountLabel(filteredCards.length, appState.cards.length);
 
     if (filteredCards.length === 0) {
-        setEmptyState(appState.cards.length === 0 ? '暂无下载的视频或弹幕' : '当前筛选条件下没有匹配的视频');
+        setEmptyState(getEmptyStateMessage());
         return;
     }
 
@@ -274,37 +225,23 @@ async function loadVideos() {
     const errorState = document.getElementById('error-state');
     const emptyState = document.getElementById('empty-state');
     const toolbar = document.getElementById('toolbar');
-    const blacklistPanel = document.getElementById('blacklist-panel');
 
     grid.classList.add('hidden');
     errorState.classList.add('hidden');
     emptyState.classList.add('hidden');
     toolbar.classList.add('hidden');
-    blacklistPanel.classList.add('hidden');
     loader.classList.remove('hidden');
 
     try {
-        const [videoResponse, blacklistResponse] = await Promise.all([
-            fetch('/api/videos'),
-            fetch('/api/download-blacklist'),
-        ]);
+        const videoResponse = await fetch('/api/videos');
         if (!videoResponse.ok) throw new Error('视频列表加载失败');
-        if (!blacklistResponse.ok) throw new Error('黑名单加载失败');
-
-        const [videoData, blacklistData] = await Promise.all([
-            videoResponse.json(),
-            blacklistResponse.json(),
-        ]);
+        const videoData = await videoResponse.json();
         if (videoData.ok === false) throw new Error(videoData.error || '视频列表加载失败');
-        if (blacklistData.ok === false) throw new Error(blacklistData.error || '黑名单加载失败');
 
         loader.classList.add('hidden');
         appState.cards = Array.isArray(videoData.data) ? videoData.data : [];
-        appState.blacklistEntries = Array.isArray(blacklistData.data) ? blacklistData.data : [];
-        appState.blacklistThreshold = Number(blacklistData.threshold) || 5;
 
         updateToolbarOptions(appState.cards);
-        renderBlacklistPanel();
 
         if (appState.cards.length === 0) {
             updateCountLabel(0, 0);
@@ -321,8 +258,34 @@ async function loadVideos() {
     }
 }
 
-async function restoreBlacklistEntry(entry) {
-    const bvid = entry?.bvid;
+async function markBlacklistEntry(cardData) {
+    const bvid = cardData?.bvid;
+    if (!bvid) return;
+
+    try {
+        const response = await fetch('/api/download-blacklist/mark', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                bvid,
+                title: cardData.title,
+                uploader: cardData.uploader,
+                uploaderMid: cardData.uploaderMid,
+                favoriteTime: cardData.favoriteTime,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+            throw new Error(data.error || '标记跳过失败');
+        }
+        await loadVideos();
+    } catch (error) {
+        alert('标记跳过失败: ' + error.message);
+    }
+}
+
+async function removeBlacklistEntry(cardData) {
+    const bvid = cardData?.bvid;
     if (!bvid) return;
 
     try {
@@ -333,18 +296,33 @@ async function restoreBlacklistEntry(entry) {
         });
         const data = await response.json();
         if (!response.ok || !data.ok) {
-            throw new Error(data.error || '恢复失败');
+            throw new Error(data.error || '恢复下载失败');
         }
         await loadVideos();
-        alert(`已恢复 ${bvid}，下次收藏夹轮询会重新尝试下载。`);
     } catch (error) {
         alert('恢复下载失败: ' + error.message);
     }
 }
 
+function toggleBlacklistEntry(cardData) {
+    if (cardData?.isBlacklisted) {
+        return removeBlacklistEntry(cardData);
+    }
+    return markBlacklistEntry(cardData);
+}
+
 function getCardStatus(card) {
     const parts = Array.isArray(card.parts) ? card.parts : [];
     const completeCount = parts.filter(part => part.videoFile && part.danmakuFile).length;
+
+    if (card?.isBlacklisted && parts.length === 0) {
+        const markedState = getMarkedStateMeta(card);
+        return {
+            className: 'blacklisted',
+            title: markedState.statusTitle,
+            text: markedState.badgeText,
+        };
+    }
 
     if (parts.length === 0 || completeCount === 0) {
         return {
@@ -418,29 +396,67 @@ function buildRevealButtonClass(hasTarget, extraClass = '') {
     return `${extraClass} ${hasTarget ? '' : 'disabled'}`.trim();
 }
 
+function buildBlacklistNote(cardData) {
+    if (!cardData?.isBlacklisted) return '';
+
+    const markedState = getMarkedStateMeta(cardData);
+    const reason = cardData.blacklistInfo?.reasonText || '资源不存在或不可访问';
+    const source = formatBlacklistSource(cardData.blacklistInfo?.lastSource);
+    const hitCount = Number(cardData.blacklistInfo?.hitCount) || 0;
+    const threshold = getBlacklistThreshold(cardData.blacklistInfo);
+    const firstSeenAt = formatDate(cardData.blacklistInfo?.firstSeenAt);
+    const lastSeenAt = formatDate(cardData.blacklistInfo?.lastSeenAt);
+    const lastMessage = String(cardData.blacklistInfo?.lastMessage || '').trim();
+    const noteLines = [
+        `原因：${reason}`,
+        `来源：${source}`,
+        `命中：${hitCount}/${threshold}`,
+        `首次发现：${firstSeenAt}`,
+        `最近发现：${lastSeenAt}`,
+    ];
+    if (lastMessage) {
+        noteLines.push(`最近摘要：${lastMessage}`);
+    }
+
+    return `
+        <div class="detail-note">
+            <div class="detail-note-title">${escapeHtml(markedState.badgeText)}状态</div>
+            <div class="detail-note-body">${escapeHtml(noteLines.join('\n'))}</div>
+        </div>
+    `;
+}
+
 function renderGrid(cards) {
     const grid = document.getElementById('video-grid');
     grid.innerHTML = '';
 
     cards.forEach(cardData => {
         const status = getCardStatus(cardData);
+        const markedState = getMarkedStateMeta(cardData);
         const card = document.createElement('article');
         card.className = 'video-card';
 
         const coverUrl = cardData.cover || DEFAULT_COVER;
         const titleSafe = escapeHtml(cardData.title || '未知标题');
         const partCount = Number(cardData.partCount) || (cardData.parts || []).length || 1;
-        const groupBadge = cardData.hasMultipleParts ? `多P · 共 ${partCount} P` : '单P';
-        const detailLabel = cardData.hasMultipleParts ? '查看分P' : '查看详情';
+        const groupBadge = cardData.blacklistOnly
+            ? '未落地资源'
+            : (cardData.hasMultipleParts ? `多P · 共 ${partCount} P` : '单P');
+        const detailLabel = cardData.blacklistOnly || !cardData.hasMultipleParts ? '查看详情' : '查看分P';
         const videoHref = escapeHtml(cardData.videoUrl || '');
         const hasPrimaryVideo = Boolean(cardData.primaryVideoPath);
         const hasPrimaryDanmaku = Boolean(cardData.primaryDanmakuPath);
+        const hasFolderTarget = Boolean(cardData.folderPath && (cardData.primaryVideoPath || cardData.primaryDanmakuPath));
+        const blacklistChip = cardData.isBlacklisted ? `<span class="group-chip blacklist">${escapeHtml(markedState.badgeText)}</span>` : '';
+        const blacklistBadge = cardData.isBlacklisted ? `<div class="blacklist-badge">${escapeHtml(markedState.badgeText)}</div>` : '';
+        const blacklistBtnLabel = cardData.isBlacklisted ? markedState.actionLabel : markedState.addActionLabel;
 
         card.innerHTML = `
             <div class="card-cover">
                 <img src="${coverUrl}" alt="${titleSafe}" loading="lazy" />
                 <div class="bvid-badge">${escapeHtml(cardData.bvid || '未知BV号')}</div>
                 <div class="parts-badge">${escapeHtml(groupBadge)}</div>
+                ${blacklistBadge}
                 <div class="cover-overlay">
                     <button class="action-btn js-open-detail" title="${escapeHtml(detailLabel)}">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/></svg>
@@ -448,7 +464,7 @@ function renderGrid(cards) {
                     <a class="action-btn action-link ${cardData.videoUrl ? '' : 'disabled'}" href="${videoHref}" target="_blank" rel="noreferrer noopener" title="打开 B 站视频">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v6a1 1 0 0 1-1 1h-6"/><path d="M10 21H4a1 1 0 0 1-1-1v-6"/></svg>
                     </a>
-                    <button class="action-btn js-open-folder" title="打开所在目录并选中文件">
+                    <button class="action-btn js-open-folder ${hasFolderTarget ? '' : 'disabled'}" title="打开所在目录并选中文件">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                     </button>
                 </div>
@@ -457,6 +473,7 @@ function renderGrid(cards) {
                 <div class="card-title" title="${titleSafe}">${titleSafe}</div>
                 <div class="card-meta-row">
                     <span class="group-chip">${escapeHtml(groupBadge)}</span>
+                    ${blacklistChip}
                     <span class="group-chip subtle">${escapeHtml(status.text)}</span>
                 </div>
                 <div class="card-up">
@@ -469,6 +486,7 @@ function renderGrid(cards) {
                     <a class="btn btn-outline btn-card-link ${cardData.videoUrl ? '' : 'disabled'}" href="${videoHref}" target="_blank" rel="noreferrer noopener">打开B站</a>
                     <button class="btn btn-outline ${buildRevealButtonClass(hasPrimaryVideo, 'btn-card-folder')}">选中视频</button>
                     <button class="btn btn-outline ${buildRevealButtonClass(hasPrimaryDanmaku, 'btn-card-danmaku')}">选中弹幕</button>
+                    <button class="btn btn-outline btn-card-blacklist">${escapeHtml(blacklistBtnLabel)}</button>
                 </div>
                 <div class="card-footer">
                     <span>${escapeHtml(formatDate(cardData.updateTime))}</span>
@@ -484,8 +502,12 @@ function renderGrid(cards) {
 
         const revealCardFile = () => openFolder(cardData.folderPath, cardData.primaryVideoPath);
         const revealCardDanmaku = () => openFolder(cardData.folderPath, cardData.primaryDanmakuPath);
-        card.querySelector('.js-open-folder').addEventListener('click', revealCardFile);
+        const cardFolderOverlayBtn = card.querySelector('.js-open-folder');
+        if (!cardFolderOverlayBtn.classList.contains('disabled')) {
+            cardFolderOverlayBtn.addEventListener('click', revealCardFile);
+        }
         card.querySelector('.btn-card-folder').addEventListener('click', revealCardFile);
+        card.querySelector('.btn-card-blacklist').addEventListener('click', () => toggleBlacklistEntry(cardData));
         const cardDanmakuBtn = card.querySelector('.btn-card-danmaku');
         if (!cardDanmakuBtn.classList.contains('disabled')) {
             cardDanmakuBtn.addEventListener('click', revealCardDanmaku);
@@ -578,33 +600,61 @@ function openDetails(cardData) {
     summary.appendChild(createSummaryChip('收藏', formatDate(cardData.favoriteTime)));
     summary.appendChild(createSummaryChip('更新', formatDate(cardData.updateTime)));
     summary.appendChild(createSummaryChip('发布', formatDate(cardData.publishTime)));
-    summary.appendChild(createSummaryChip('类型', cardData.hasMultipleParts ? '多P视频' : '单P视频'));
+    const markedState = getMarkedStateMeta(cardData);
+    summary.appendChild(createSummaryChip('类型', cardData.blacklistOnly ? '状态保留' : (cardData.hasMultipleParts ? '多P视频' : '单P视频')));
+    if (cardData.isBlacklisted) {
+        summary.appendChild(createSummaryChip('状态', markedState.badgeText));
+        summary.appendChild(createSummaryChip('原因', cardData.blacklistInfo?.reasonText || '资源不存在或不可访问'));
+        summary.appendChild(createSummaryChip('来源', formatBlacklistSource(cardData.blacklistInfo?.lastSource)));
+        summary.appendChild(createSummaryChip('命中', `${Number(cardData.blacklistInfo?.hitCount) || 0}/${getBlacklistThreshold(cardData.blacklistInfo)}`));
+    }
     bodyEl.appendChild(summary);
 
     const hasPrimaryVideo = Boolean(cardData.primaryVideoPath);
     const hasPrimaryDanmaku = Boolean(cardData.primaryDanmakuPath);
+    const blacklistBtnLabel = cardData.isBlacklisted ? markedState.actionLabel : markedState.addActionLabel;
     const actionBar = document.createElement('div');
     actionBar.className = 'detail-action-bar';
     actionBar.innerHTML = `
         <a class="btn btn-outline ${cardData.videoUrl ? '' : 'disabled'}" href="${escapeHtml(cardData.videoUrl || '')}" target="_blank" rel="noreferrer noopener">打开B站</a>
+        <a class="btn btn-outline ${cardData.uploaderUrl ? '' : 'disabled'}" href="${escapeHtml(cardData.uploaderUrl || '')}" target="_blank" rel="noreferrer noopener">UP空间</a>
         <button class="btn btn-outline ${buildRevealButtonClass(hasPrimaryVideo, 'btn-detail-folder')}">选中主视频</button>
         <button class="btn btn-outline ${buildRevealButtonClass(hasPrimaryDanmaku, 'btn-detail-danmaku')}">选中主弹幕</button>
+        <button class="btn btn-outline btn-detail-blacklist">${escapeHtml(blacklistBtnLabel)}</button>
     `;
     const detailFolderBtn = actionBar.querySelector('.btn-detail-folder');
     const detailDanmakuBtn = actionBar.querySelector('.btn-detail-danmaku');
+    const detailBlacklistBtn = actionBar.querySelector('.btn-detail-blacklist');
     if (!detailFolderBtn.classList.contains('disabled')) {
         detailFolderBtn.addEventListener('click', () => openFolder(cardData.folderPath, cardData.primaryVideoPath));
     }
     if (!detailDanmakuBtn.classList.contains('disabled')) {
         detailDanmakuBtn.addEventListener('click', () => openFolder(cardData.folderPath, cardData.primaryDanmakuPath));
     }
+    detailBlacklistBtn.addEventListener('click', async () => {
+        closeDetails();
+        await toggleBlacklistEntry(cardData);
+    });
     bodyEl.appendChild(actionBar);
+    const blacklistNoteMarkup = buildBlacklistNote(cardData);
+    if (blacklistNoteMarkup) {
+        bodyEl.insertAdjacentHTML('beforeend', blacklistNoteMarkup);
+    }
 
     const list = document.createElement('div');
     list.className = 'detail-parts-list';
-    (cardData.parts || []).forEach(part => {
-        list.appendChild(buildDetailPartRow(cardData, part));
-    });
+    if ((cardData.parts || []).length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'detail-empty';
+        empty.textContent = cardData.isBlacklisted
+            ? '该视频当前没有本地视频或弹幕文件，已通过状态记录保留在列表中。'
+            : '该视频当前没有可展示的分P信息。';
+        list.appendChild(empty);
+    } else {
+        (cardData.parts || []).forEach(part => {
+            list.appendChild(buildDetailPartRow(cardData, part));
+        });
+    }
     bodyEl.appendChild(list);
 
     modal.classList.remove('hidden');

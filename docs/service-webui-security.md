@@ -18,6 +18,8 @@
   - 记录一次失效 / 不可访问命中并累计次数
 - `POST /api/download-blacklist/remove`
   - 手动移除某个 BV 的黑名单状态
+- `POST /api/download-blacklist/mark`
+  - 手动把某个 BV 直接加入黑名单
 - `POST /api/open-folder`
   - 打开本机文件夹，并可选中对应视频或弹幕文件
 - `GET /files/*`
@@ -40,8 +42,11 @@ http://127.0.0.1:18888/webui
 - 显示添加收藏时间、更新弹幕时间、视频发布时间
 - 按收藏时间 / 弹幕更新时间 / 发布时间排序
 - 按 UP 主筛选
-- 查看独立的失效视频黑名单面板
-- 显示失效原因、命中次数、最近来源、首次 / 最近发现时间与错误摘要
+- 按状态筛选“全部视频 / 仅黑名单 / 排除黑名单”
+- 将黑名单视频直接混排到主视频流卡片中，并保留统一卡片样式
+- 在卡片和详情弹层中直接把视频加入黑名单或移出黑名单
+- 在详情弹层中显示失效原因、命中次数、最近来源、首次 / 最近发现时间与错误摘要
+- 在详情弹层中提供原视频页和 UP 主空间的外链跳转
 - 手动将黑名单中的 BV 恢复到后续轮询队列
 - 跳转到对应视频的 B 站页面
 - 点击 UP 主跳转到空间页
@@ -112,7 +117,8 @@ http://127.0.0.1:18888/webui
 - 每次命中累加一次
 - 默认阈值 `5`
 - 达到阈值后变为 `blacklisted`
-- WebUI 只展示 `blacklisted` 条目
+- `/api/download-blacklist` 只返回 `blacklisted` 条目
+- `/api/videos` 会把这些黑名单条目合并回主视频卡片流
 - 手动移除后计数归零，下次轮询重新开始累计
 
 ## 安全边界
@@ -140,6 +146,7 @@ http://127.0.0.1:18888/webui
 - `/api/download-blacklist`
 - `/api/download-blacklist/report`
 - `/api/download-blacklist/remove`
+- `/api/download-blacklist/mark`
 - `/files/*`
 - `/api/open-folder`
 
