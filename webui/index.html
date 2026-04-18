@@ -53,6 +53,28 @@
                 </div>
             </section>
 
+            <section id="status-legend" class="status-legend hidden" aria-label="视频卡片状态说明">
+                <div class="status-legend-title">状态圆点说明</div>
+                <div class="status-legend-items">
+                    <span class="status-legend-item" title="所有分P的视频和弹幕已下载">
+                        <span class="status-dot" aria-hidden="true"></span>
+                        绿点：完整
+                    </span>
+                    <span class="status-legend-item" title="部分分P缺少视频或弹幕">
+                        <span class="status-dot partial" aria-hidden="true"></span>
+                        黄点：部分完整
+                    </span>
+                    <span class="status-legend-item" title="当前没有完整落地资源">
+                        <span class="status-dot missing" aria-hidden="true"></span>
+                        红点：未完成
+                    </span>
+                    <span class="status-legend-item" title="该视频已失效或被手动标记为跳过">
+                        <span class="status-dot blacklisted" aria-hidden="true"></span>
+                        粉点：已失效 / 手动跳过
+                    </span>
+                </div>
+            </section>
+
             <!-- Loader -->
             <div id="loader" class="loader-container">
                 <div class="spinner"></div>

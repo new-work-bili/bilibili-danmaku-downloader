@@ -123,6 +123,7 @@ function getFilteredCards() {
 
 function updateToolbarOptions(cards) {
     const toolbar = document.getElementById('toolbar');
+    const statusLegend = document.getElementById('status-legend');
     const blacklistSelect = document.getElementById('blacklist-select');
     const uploaderSelect = document.getElementById('uploader-select');
     const uniqueUploaders = [...new Set(cards.map(getUploaderName))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
@@ -147,7 +148,9 @@ function updateToolbarOptions(cards) {
     uploaderSelect.value = appState.uploaderFilter;
     blacklistSelect.value = appState.blacklistFilter;
 
-    toolbar.classList.toggle('hidden', cards.length === 0);
+    const hasCards = cards.length > 0;
+    toolbar.classList.toggle('hidden', !hasCards);
+    statusLegend.classList.toggle('hidden', !hasCards);
 }
 
 function updateCountLabel(filteredCount, totalCount) {
@@ -225,11 +228,13 @@ async function loadVideos() {
     const errorState = document.getElementById('error-state');
     const emptyState = document.getElementById('empty-state');
     const toolbar = document.getElementById('toolbar');
+    const statusLegend = document.getElementById('status-legend');
 
     grid.classList.add('hidden');
     errorState.classList.add('hidden');
     emptyState.classList.add('hidden');
     toolbar.classList.add('hidden');
+    statusLegend.classList.add('hidden');
     loader.classList.remove('hidden');
 
     try {

@@ -29,6 +29,43 @@
 ### 文档更新
 ```
 
+## 2026-04-18 WebUI 补充状态圆点说明
+
+### 背景
+
+WebUI 卡片右下角已经有状态圆点，但颜色含义只存在于 tooltip 和代码里，第一次使用时不够直观，容易看不出绿色、黄色、红色和粉色分别代表什么。
+
+### 本轮目标
+
+- 把卡片状态圆点的颜色说明直接展示在 WebUI 主界面
+- 保持卡片本身布局不变，不额外挤压单卡操作区
+- 同步补正文档中的 WebUI 能力描述
+
+### 已完成
+
+- `webui/index.html` 在工具栏下方新增“状态圆点说明”区域
+- `webui/style.css` 为状态说明增加与现有界面一致的胶囊样式和移动端布局
+- `webui/app.js` 改为在有视频数据时同时显示筛选栏和状态说明
+- `docs/service-webui-security.md` 补充了四种状态圆点的可见说明
+
+### 遗留事项
+
+- 当前仍然依赖颜色区分，尚未给卡片 footer 本身补充文字标签
+- WebUI 关键词搜索和弹幕叠加播放仍未实现
+
+### 涉及文件
+
+- `webui/index.html`
+- `webui/app.js`
+- `webui/style.css`
+- `docs/service-webui-security.md`
+- `docs/iteration-log.md`
+
+### 文档更新
+
+- service/security 文档已补记 WebUI 中的状态圆点说明
+- 本文补记了这次状态说明从“仅靠 tooltip”改为“界面显式展示”的迭代
+
 ## 2026-04-17 黑名单交互回收至主视频流
 
 ### 背景

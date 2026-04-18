@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 弹幕下载器 v4（本地服务版）
 // @namespace    https://github.com/bilibili-danmaku-downloader
-// @version      4.1
+// @version      4.1.1
 // @description  配合本地 danmaku-server.mjs 服务使用，支持自定义保存目录、自动建子文件夹、同名覆盖。降级模式下退回浏览器内置下载。
 // @author       bilibili-danmaku-downloader
 // @match        *://www.bilibili.com/video/BV*
@@ -27,6 +27,11 @@
     const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000;
     const MAX_LOG_ENTRIES = 500;
     const MAX_PARALLEL_REQUESTS = 3;
+    const SCRIPT_UPDATED_AT = '2026-04-18 01:28';
+    const SCRIPT_VERSION = typeof GM_info === 'object' && GM_info?.script?.version
+        ? String(GM_info.script.version).trim()
+        : '4.1.1';
+    const SCRIPT_VERSION_LABEL = /^v/i.test(SCRIPT_VERSION) ? SCRIPT_VERSION : `V${SCRIPT_VERSION}`;
     const STORAGE_KEYS = {
         FAV_ID: 'ddl_fav_media_id',
         POLL_ENABLED: 'ddl_poll_enabled',
@@ -677,6 +682,12 @@
             align-items: center;
             justify-content: space-between;
         }
+        .ddl-header-main {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 0;
+        }
         .ddl-header-title {
             color: #fff;
             font-size: 14px;
@@ -687,6 +698,29 @@
             gap: 8px;
         }
         .ddl-header-title svg { flex-shrink: 0; }
+        .ddl-header-meta {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            padding-left: 26px;
+        }
+        .ddl-header-version {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.2);
+            color: #fff;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+        }
+        .ddl-header-updated {
+            color: rgba(255, 255, 255, 0.82);
+            font-size: 10px;
+            letter-spacing: 0.03em;
+        }
         .ddl-close-btn {
             background: rgba(255, 255, 255, 0.2);
             border: none;
@@ -1089,11 +1123,19 @@
 
     const savedFavId = GM_getValue(STORAGE_KEYS.FAV_ID, '');
     const savedPollEnabled = GM_getValue(STORAGE_KEYS.POLL_ENABLED, false);
+    const headerVersionMarkup = escapeHtml(SCRIPT_VERSION_LABEL);
+    const headerUpdatedAtMarkup = escapeHtml(SCRIPT_UPDATED_AT);
 
     panel.innerHTML = `
         <div class="ddl-container">
             <div class="ddl-header">
-                <span class="ddl-header-title">${danmakuIcon} 弹幕下载器</span>
+                <div class="ddl-header-main">
+                    <span class="ddl-header-title">${danmakuIcon} 弹幕下载器</span>
+                    <div class="ddl-header-meta">
+                        <span class="ddl-header-version">${headerVersionMarkup}</span>
+                        <span class="ddl-header-updated">更新于 ${headerUpdatedAtMarkup}</span>
+                    </div>
+                </div>
                 <button class="ddl-close-btn" title="收起面板">✕</button>
             </div>
             <div class="ddl-body">
