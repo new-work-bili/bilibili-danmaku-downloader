@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 弹幕下载器 v4（本地服务版）
 // @namespace    https://github.com/bilibili-danmaku-downloader
-// @version      4.1.1
-// @description  配合本地 danmaku-server.mjs 服务使用，支持自定义保存目录、自动建子文件夹、同名覆盖。降级模式下退回浏览器内置下载。
+// @version      4.1.2
+// @description  配合本地 danmaku-server.mjs 服务使用，支持自定义保存目录、自动建子文件夹、同名覆盖，并提供可配置的浏览器降级下载。
 // @author       bilibili-danmaku-downloader
 // @match        *://www.bilibili.com/video/BV*
 // @match        *://www.bilibili.com/video/av*
@@ -27,14 +27,15 @@
     const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000;
     const MAX_LOG_ENTRIES = 500;
     const MAX_PARALLEL_REQUESTS = 3;
-    const SCRIPT_UPDATED_AT = '2026-04-18 01:28';
+    const SCRIPT_UPDATED_AT = '2026-04-19 12:10';
     const SCRIPT_VERSION = typeof GM_info === 'object' && GM_info?.script?.version
         ? String(GM_info.script.version).trim()
-        : '4.1.1';
+        : '4.1.2';
     const SCRIPT_VERSION_LABEL = /^v/i.test(SCRIPT_VERSION) ? SCRIPT_VERSION : `V${SCRIPT_VERSION}`;
     const STORAGE_KEYS = {
         FAV_ID: 'ddl_fav_media_id',
         POLL_ENABLED: 'ddl_poll_enabled',
+        BROWSER_FALLBACK_ENABLED: 'ddl_browser_fallback_enabled',
         LAST_POLL_TIME: 'ddl_last_poll_time',
         ACTIVE_TAB_TOKEN: 'ddl_active_tab_token',
         ACTIVE_TAB_TS: 'ddl_active_tab_ts',
@@ -81,6 +82,30 @@
 
     function getBvIdLookupKey(value) {
         return normalizeBvId(value).toUpperCase();
+    }
+
+    function escapeHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function isBrowserFallbackEnabled() {
+        return GM_getValue(STORAGE_KEYS.BROWSER_FALLBACK_ENABLED, false);
+    }
+
+    function getServerStatusText(available) {
+        if (available) return '🟢 本地服务已连接';
+        return isBrowserFallbackEnabled()
+            ? '🔴 本地服务未运行（将降级为浏览器下载）'
+            : '🔴 本地服务未运行（浏览器降级已关闭）';
+    }
+
+    function buildSaveFailureMessage(reason) {
+        return `${reason}，且未开启浏览器降级下载`;
     }
 
     function isUnavailableViewError(error) {
@@ -255,20 +280,36 @@
 
     /**
      * 发送文件到本地服务（danmaku-server.mjs）写入磁盘。
-     * 服务不可用时自动降级到浏览器内置下载（文件名正确，无子文件夹）。
+     * 服务不可用或写入失败时，可按配置降级到浏览器内置下载。
      * @param {string} filename  文件名（不含路径）
      * @param {string} content   文件内容
      * @param {string} [folder]  可选子文件夹，仅服务模式有效
-     * @returns {Promise<{ok: boolean, path?: string, fallback?: boolean, time: number}>}
+     * @returns {Promise<{ok: boolean, path?: string, fallback?: boolean, error?: string, time: number}>}
      */
     function downloadFile(filename, content, folder = '') {
         return new Promise(resolve => {
+            const fallbackEnabled = isBrowserFallbackEnabled();
             const finish = (result = {}) => {
                 resolve({
                     ok: result.ok !== false,
                     path: result.path,
                     fallback: !!result.fallback,
                     time: Date.now(),
+                });
+            };
+            const fallbackOrFail = (reason, options = {}) => {
+                if (options.markServerUnavailable) {
+                    serverAvailable = false;
+                    updateServerStatus(false);
+                }
+                if (fallbackEnabled) {
+                    browserDownload(filename, content);
+                    finish({ ok: true, fallback: true });
+                    return;
+                }
+                finish({
+                    ok: false,
+                    error: buildSaveFailureMessage(reason),
                 });
             };
 
@@ -284,32 +325,33 @@
                             const result = JSON.parse(res.responseText);
                             if (!result.ok) {
                                 console.error('[弹幕下载器] 服务端写入失败，降级:', result.error);
-                                browserDownload(filename, content);
-                                finish({ ok: true, fallback: true });
+                                fallbackOrFail(`服务端写入失败: ${result.error || '未知错误'}`);
                                 return;
                             }
                             finish(result);
                         } catch (e) {
-                            browserDownload(filename, content);
-                            finish({ ok: true, fallback: true });
+                            fallbackOrFail('服务端返回异常');
                         }
                     },
                     onerror: () => {
-                        serverAvailable = false;
-                        updateServerStatus(false);
-                        browserDownload(filename, content);
-                        finish({ ok: true, fallback: true });
+                        fallbackOrFail('本地服务不可用', { markServerUnavailable: true });
                     },
                     ontimeout: () => {
-                        browserDownload(filename, content);
-                        finish({ ok: true, fallback: true });
+                        fallbackOrFail('本地服务请求超时');
                     },
                 });
             } else {
-                browserDownload(filename, content);
-                finish({ ok: true, fallback: true });
+                fallbackOrFail('本地服务未连接');
             }
         });
+    }
+
+    async function saveFileOrThrow(filename, content, folder = '') {
+        const result = await downloadFile(filename, content, folder);
+        if (!result.ok) {
+            throw new Error(result.error || '文件保存失败');
+        }
+        return result;
     }
 
     function browserDownload(filename, content) {
@@ -443,7 +485,7 @@
     function updateServerStatus(available) {
         const el = document.getElementById('ddl-server-status');
         if (!el) return;
-        el.textContent = available ? '🟢 本地服务已连接' : '🔴 本地服务未运行（降级为浏览器下载）';
+        el.textContent = getServerStatusText(available);
         el.style.color = available ? '#52c41a' : 'rgba(255,100,80,0.9)';
     }
 
@@ -1123,8 +1165,10 @@
 
     const savedFavId = GM_getValue(STORAGE_KEYS.FAV_ID, '');
     const savedPollEnabled = GM_getValue(STORAGE_KEYS.POLL_ENABLED, false);
+    const savedBrowserFallbackEnabled = isBrowserFallbackEnabled();
     const headerVersionMarkup = escapeHtml(SCRIPT_VERSION_LABEL);
     const headerUpdatedAtMarkup = escapeHtml(SCRIPT_UPDATED_AT);
+    const initialServerStatusMarkup = escapeHtml(getServerStatusText(false));
 
     panel.innerHTML = `
         <div class="ddl-container">
@@ -1188,9 +1232,17 @@
 
                 <!-- 服务器状态 + 诊断信息 -->
                 <div class="ddl-diag" id="ddl-diag">
-                    <span id="ddl-server-status" style="font-size:10px;color:rgba(255,100,80,0.9);">🔴 本地服务未运行（降级为浏览器下载）</span><br/>
+                    <span id="ddl-server-status" style="font-size:10px;color:rgba(255,100,80,0.9);">${initialServerStatusMarkup}</span><br/>
                     <span class="ddl-diag-label">标签角色：</span><span class="ddl-diag-value" id="ddl-diag-role">初始化中...</span><br/>
                     <span class="ddl-diag-label">后台唤醒：</span><span class="ddl-diag-value" id="ddl-diag-wakes">0 次</span>
+                </div>
+
+                <div class="ddl-switch-row">
+                    <span class="ddl-switch-label">服务不可用时启用浏览器降级</span>
+                    <button class="ddl-switch ${savedBrowserFallbackEnabled ? 'on' : ''}" id="ddl-browser-fallback-switch"></button>
+                </div>
+                <div class="ddl-input-hint">
+                    默认关闭。开启后，弹幕和轮询日志会退回浏览器默认下载目录，无法保留子文件夹和同名覆盖。
                 </div>
 
                 <button class="ddl-btn ddl-btn-secondary ddl-btn-sm" id="ddl-poll-now"
@@ -1245,6 +1297,7 @@
     const favIdInput = panel.querySelector('#ddl-fav-id');
     const favSaveBtn = panel.querySelector('#ddl-fav-save');
     const pollSwitch = panel.querySelector('#ddl-poll-switch');
+    const browserFallbackSwitch = panel.querySelector('#ddl-browser-fallback-switch');
     const pollStatusEl = panel.querySelector('#ddl-poll-status');
     const pollNowBtn = panel.querySelector('#ddl-poll-now');
     const logOpenBtn = panel.querySelector('#ddl-log-open');
@@ -1331,31 +1384,42 @@
         setStatus('');
         setProgress(0, `0 / ${pages.length}`);
 
-        let succCount = 0, failCount = 0;
+        let succCount = 0;
+        let failCount = 0;
+        let fallbackCount = 0;
 
-        for (let i = 0; i < pages.length; i++) {
-            const page = pages[i];
-            try {
-                const content = await fetchXmlContent(`https://comment.bilibili.com/${page.cid}.xml`);
-                await downloadFile(buildPartXmlFileName(videoInfo, page), content, getDanmakuFolder(groupDir));
-                succCount++;
-            } catch (err) {
-                failCount++;
-                console.error(`[弹幕下载器] P${page.page} 下载失败:`, err.message);
+        try {
+            for (let i = 0; i < pages.length; i++) {
+                const page = pages[i];
+                try {
+                    const content = await fetchXmlContent(`https://comment.bilibili.com/${page.cid}.xml`);
+                    const saveResult = await saveFileOrThrow(
+                        buildPartXmlFileName(videoInfo, page),
+                        content,
+                        getDanmakuFolder(groupDir)
+                    );
+                    succCount++;
+                    if (saveResult.fallback) fallbackCount++;
+                } catch (err) {
+                    failCount++;
+                    console.error(`[弹幕下载器] P${page.page} 下载失败:`, err.message);
+                }
+                setProgress(((i + 1) / pages.length) * 100, `${i + 1} / ${pages.length}`);
+                if (pages.length > 1) await sleep(300);
             }
-            setProgress(((i + 1) / pages.length) * 100, `${i + 1} / ${pages.length}`);
-            if (pages.length > 1) await sleep(300);
-        }
 
-        resetProgress();
-        setVideoButtonsDisabled(false);
-        if (failCount === 0) {
-            setStatus(`✅ 全部完成！共下载 ${succCount} 个文件`, 'success');
-        } else {
-            setStatus(`完成：${succCount} 成功, ${failCount} 失败`, 'error');
-        }
+            const fallbackSuffix = fallbackCount > 0 ? `，其中 ${fallbackCount} 个走浏览器降级` : '';
+            if (failCount === 0) {
+                setStatus(`✅ 全部完成！共下载 ${succCount} 个文件${fallbackSuffix}`, 'success');
+            } else {
+                setStatus(`完成：${succCount} 成功, ${failCount} 失败${fallbackSuffix}`, 'error');
+            }
 
-        await queueVideoDownloads(videoInfo);
+            await queueVideoDownloads(videoInfo);
+        } finally {
+            resetProgress();
+            setVideoButtonsDisabled(false);
+        }
     }
 
     async function downloadMerge() {
@@ -1367,28 +1431,56 @@
         setProgress(0, `正在下载并合并 ${pages.length} P ...`);
 
         const partResults = [];
-        for (let i = 0; i < pages.length; i++) {
-            const page = pages[i];
-            try {
-                const content = await fetchXmlContent(`https://comment.bilibili.com/${page.cid}.xml`);
-                await downloadFile(buildPartXmlFileName(videoInfo, page), content, getDanmakuFolder(groupDir));
-                partResults.push({ cid: page.cid, content });
-            } catch (err) {
-                console.error(`[弹幕下载器] P${page.page} 下载失败:`, err.message);
+        let fallbackCount = 0;
+
+        try {
+            for (let i = 0; i < pages.length; i++) {
+                const page = pages[i];
+                try {
+                    const content = await fetchXmlContent(`https://comment.bilibili.com/${page.cid}.xml`);
+                    const saveResult = await saveFileOrThrow(
+                        buildPartXmlFileName(videoInfo, page),
+                        content,
+                        getDanmakuFolder(groupDir)
+                    );
+                    if (saveResult.fallback) fallbackCount++;
+                    partResults.push({ cid: page.cid, content });
+                } catch (err) {
+                    console.error(`[弹幕下载器] P${page.page} 下载失败:`, err.message);
+                }
+                setProgress(((i + 1) / pages.length) * 80, `下载中 ${i + 1}/${pages.length}`);
             }
-            setProgress(((i + 1) / pages.length) * 80, `下载中 ${i + 1}/${pages.length}`);
+
+            if (!partResults.length) {
+                throw new Error('没有可合并的弹幕文件');
+            }
+
+            setProgress(88, '合并中...');
+            const mergedResult = buildMergedXml(partResults);
+            setProgress(95, '保存文件...');
+            const mergedSaveResult = await saveFileOrThrow(
+                buildMergedXmlFileName(title, bvid),
+                mergedResult.content,
+                getDanmakuFolder(groupDir)
+            );
+            if (mergedSaveResult.fallback) fallbackCount++;
+
+            const failCount = pages.length - partResults.length;
+            const fallbackSuffix = fallbackCount > 0 ? `，其中 ${fallbackCount} 次走浏览器降级` : '';
+            if (failCount === 0) {
+                setStatus(`✅ 合并完成！共 ${mergedResult.danmakuCount} 条弹幕${fallbackSuffix}`, 'success');
+            } else {
+                setStatus(`合并完成：${partResults.length} 成功, ${failCount} 失败${fallbackSuffix}`, 'error');
+            }
+
+            await queueVideoDownloads(videoInfo);
+        } catch (err) {
+            console.error('[弹幕下载器] 合并下载失败:', err.message);
+            setStatus(`合并下载失败: ${err.message}`, 'error');
+        } finally {
+            resetProgress();
+            setVideoButtonsDisabled(false);
         }
-
-        setProgress(88, '合并中...');
-        const mergedResult = buildMergedXml(partResults);
-        setProgress(95, '保存文件...');
-        await downloadFile(buildMergedXmlFileName(title, bvid), mergedResult.content, getDanmakuFolder(groupDir));
-
-        resetProgress();
-        setVideoButtonsDisabled(false);
-        setStatus(`✅ 合并完成！共 ${mergedResult.danmakuCount} 条弹幕`, 'success');
-
-        await queueVideoDownloads(videoInfo);
     }
 
     btnSplit.addEventListener('click', downloadSplit);
@@ -1624,7 +1716,8 @@
                     const groupDir = buildGroupDir(videoData.title, videoData.bvid);
                     const danmakuFolder = getDanmakuFolder(groupDir);
                     const parts = await fetchDanmakuPartsForVideoData(videoData);
-                    const successfulParts = parts.filter(part => part.ok);
+                    let savedPartCount = 0;
+                    let fallbackSavedCount = 0;
 
                     sessionLines.push(`✅ ${videoData.title}`);
                     sessionLines.push(`   BV: ${videoData.bvid}`);
@@ -1632,8 +1725,15 @@
 
                     for (const part of parts) {
                         if (part.ok) {
-                            const saveResult = await downloadFile(part.fileName, part.content, danmakuFolder);
-                            sessionLines.push(`   [成功] ${part.fileName} · 更新时间 ${formatTime(saveResult.time)}`);
+                            try {
+                                const saveResult = await saveFileOrThrow(part.fileName, part.content, danmakuFolder);
+                                savedPartCount++;
+                                if (saveResult.fallback) fallbackSavedCount++;
+                                const fallbackLabel = saveResult.fallback ? ' · 浏览器降级' : '';
+                                sessionLines.push(`   [成功] ${part.fileName}${fallbackLabel} · 更新时间 ${formatTime(saveResult.time)}`);
+                            } catch (err) {
+                                sessionLines.push(`   [失败] ${part.fileName} · ${err.message}`);
+                            }
                         } else {
                             sessionLines.push(`   [失败] ${part.fileName} · ${part.error}`);
                         }
@@ -1646,12 +1746,12 @@
                     });
 
                     addLog({
-                        type: successfulParts.length === parts.length ? 'success' : 'error',
+                        type: savedPartCount === parts.length ? 'success' : 'error',
                         bvid: normalizedBvid,
                         title: video.title,
-                        message: `弹幕更新完成 · ${successfulParts.length}/${parts.length} P`,
+                        message: `弹幕更新完成 · ${savedPartCount}/${parts.length} P${fallbackSavedCount ? ` · 浏览器降级 ${fallbackSavedCount} P` : ''}`,
                     });
-                    if (successfulParts.length === parts.length) {
+                    if (savedPartCount === parts.length) {
                         totalSuccess++;
                     } else {
                         totalFail++;
@@ -1734,7 +1834,14 @@
             sessionLines.push('─'.repeat(50));
             sessionLines.push(`合计: ${totalSuccess} 成功, ${totalFail} 失败, ${totalSkipped} 跳过`);
             const logContent = sessionLines.join('\n');
-            await downloadFile(`轮询日志_${pollTimestamp}.txt`, logContent, getDanmakuLogFolder());
+            try {
+                const logSaveResult = await saveFileOrThrow(`轮询日志_${pollTimestamp}.txt`, logContent, getDanmakuLogFolder());
+                if (logSaveResult.fallback) {
+                    addLog({ type: 'info', message: '轮询日志已通过浏览器降级下载保存' });
+                }
+            } catch (err) {
+                addLog({ type: 'error', message: `写入轮询日志失败: ${err.message}` });
+            }
 
             // 发送桌面通知
             try {
@@ -1770,6 +1877,13 @@
         pollSwitch.classList.toggle('on', newState);
         updatePollStatusUI();
         if (newState) schedulePoll();
+    });
+
+    browserFallbackSwitch.addEventListener('click', () => {
+        const newState = !isBrowserFallbackEnabled();
+        GM_setValue(STORAGE_KEYS.BROWSER_FALLBACK_ENABLED, newState);
+        browserFallbackSwitch.classList.toggle('on', newState);
+        updateServerStatus(serverAvailable);
     });
 
     pollNowBtn.addEventListener('click', () => {
